@@ -1,4 +1,4 @@
-# 🐾 MiAi — How to Run & Check Status
+# 🐾 MyAi — How to Run & Check Status
 
 ## Quick Health Check
 
@@ -22,7 +22,7 @@ ollama list
 
 ---
 
-## Starting MiAi from Scratch
+## Starting MyAi from Scratch
 
 You need **3 PowerShell windows**. Open them all and run these commands in order:
 
@@ -32,7 +32,7 @@ ollama serve
 ```
 > Leave this running. If you see "address already in use", Ollama is already running — that's fine, skip this step.
 
-### Window 2 — MiAi Bot Server
+### Window 2 — MyAi Bot Server
 ```powershell
 cd C:\Users\anubh\Downloads\miai-transfer
 .venv\Scripts\activate
@@ -68,7 +68,7 @@ Free ngrok gives you a **new URL every time** you restart it. You MUST update Az
 
 1. Copy the new `https://XXXX.ngrok-free.app` URL from the ngrok window
 2. Go to **Azure Portal** → https://portal.azure.com
-3. Search for your **Azure Bot** resource (the one you named for MiAi)
+3. Search for your **Azure Bot** resource (the one you named for MyAi)
 4. Click **Configuration** in the left sidebar
 5. Update **Messaging endpoint** to:
    ```
@@ -80,7 +80,7 @@ Free ngrok gives you a **new URL every time** you restart it. You MUST update Az
 
 ---
 
-## Stopping MiAi
+## Stopping MyAi
 
 Just close the 3 PowerShell windows, or press `Ctrl+C` in each one.
 
@@ -132,5 +132,5 @@ These are stored in `.env` — don't share them:
 Paste this in PowerShell to check everything at once:
 
 ```powershell
-Write-Host "`n=== MiAi Status ===" -ForegroundColor Cyan; try { $h = Invoke-RestMethod http://localhost:8000/health -TimeoutSec 3; Write-Host "Bot Server: ✅ $($h.status) | Ollama: $($h.ollama) | Model: $($h.model)" -ForegroundColor Green } catch { Write-Host "Bot Server: ❌ Not running" -ForegroundColor Red }; try { $t = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels -TimeoutSec 3; Write-Host "ngrok:      ✅ $($t.tunnels[0].public_url)" -ForegroundColor Green } catch { Write-Host "ngrok:      ❌ Not running" -ForegroundColor Red }; try { $o = ollama list 2>&1; Write-Host "Ollama:     ✅ Running" -ForegroundColor Green } catch { Write-Host "Ollama:     ❌ Not running" -ForegroundColor Red }
+Write-Host "`n=== MyAi Status ===" -ForegroundColor Cyan; try { $h = Invoke-RestMethod http://localhost:8000/health -TimeoutSec 3; Write-Host "Bot Server: ✅ $($h.status) | Ollama: $($h.ollama) | Model: $($h.model)" -ForegroundColor Green } catch { Write-Host "Bot Server: ❌ Not running" -ForegroundColor Red }; try { $t = Invoke-RestMethod http://127.0.0.1:4040/api/tunnels -TimeoutSec 3; Write-Host "ngrok:      ✅ $($t.tunnels[0].public_url)" -ForegroundColor Green } catch { Write-Host "ngrok:      ❌ Not running" -ForegroundColor Red }; try { $o = ollama list 2>&1; Write-Host "Ollama:     ✅ Running" -ForegroundColor Green } catch { Write-Host "Ollama:     ❌ Not running" -ForegroundColor Red }
 ```

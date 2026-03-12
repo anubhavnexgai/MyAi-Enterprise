@@ -4,18 +4,18 @@
   "version": "1.0.0",
   "id": "e3037a1a-835c-44f8-8d94-bde0e458ddc4",
   "developer": {
-    "name": "MiAi",
+    "name": "MyAi",
     "websiteUrl": "https://miai.ai",
     "privacyUrl": "https://miai.ai",
     "termsOfUseUrl": "https://miai.ai"
   },
   "name": {
-    "short": "MiAi",
-    "full": "MiAi AI Agent"
+    "short": "MyAi",
+    "full": "MyAi AI Agent"
   },
   "description": {
     "short": "Local AI assistant powered by Ollama",
-    "full": "MiAi is a secure, locally-running AI agent that accesses your files, searches the web, and answers questions without sending your data to the cloud."
+    "full": "MyAi is a secure, locally-running AI agent that accesses your files, searches the web, and answers questions without sending your data to the cloud."
   },
   "icons": {
     "color": "color.png",
