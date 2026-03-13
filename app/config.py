@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     database_path: str = "data/miai.db"
     chroma_path: str = "data/chroma"
 
+    # Meeting Transcript
+    meeting_suggestion_debounce_seconds: int = 15
+    meeting_transcript_max_chars: int = 12000
+    meeting_suggestion_model: str = ""  # empty = use default ollama_model
+    callback_host: str = ""  # e.g. https://xxxx.ngrok-free.app (for calling/transcript webhooks)
+    transcript_webhook_secret: str = "miai-transcript-secret"  # clientState for Graph subscription validation
+
     @property
     def allowed_user_list(self) -> list[str] | None:
         if self.allowed_users.strip() == "*":
