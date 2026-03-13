@@ -25,6 +25,7 @@ from app.services.ollama import OllamaClient
 
 if TYPE_CHECKING:
     from app.services.graph import GraphClient
+    from app.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +64,13 @@ class MeetingTranscriptService:
         ollama: OllamaClient,
         deliver_fn: Callable[[MeetingSession, str], Awaitable[None]] | None = None,
         graph_client: GraphClient | None = None,
+        database: Database | None = None,
         poll_interval_seconds: int = 30,
     ):
         self.ollama = ollama
         self.deliver_fn = deliver_fn
         self.graph_client = graph_client
+        self.database = database
         self._sessions: dict[str, MeetingSession] = {}  # keyed by call_id
         self._debounce_seconds = settings.meeting_suggestion_debounce_seconds
         self._max_transcript_chars = settings.meeting_transcript_max_chars
@@ -111,10 +114,47 @@ class MeetingTranscriptService:
             session._pending_task.cancel()
         if session:
             logger.info(f"Meeting session ended: call_id={call_id}")
+            # Save meeting summary in the background
+            if self.database and session.transcript_lines:
+                asyncio.create_task(self._save_meeting_summary(session))
         # Stop poll loop if no more sessions need it
         if not self._sessions and self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
             self._poll_task = None
+
+    async def _save_meeting_summary(self, session: MeetingSession) -> None:
+        """Generate and save a meeting summary when a session ends."""
+        try:
+            transcript = self.get_rolling_transcript(session)
+            if not transcript.strip():
+                return
+
+            messages = [
+                {"role": "system", "content": "Summarize this meeting transcript concisely. "
+                 "Output two sections: SUMMARY (2-3 sentences) and KEY_POINTS (bullet list of decisions/action items)."},
+                {"role": "user", "content": transcript},
+            ]
+            result = await self.ollama.chat(messages=messages)
+            summary_text = result.get("message", {}).get("content", "").strip()
+
+            # Split into summary and key points
+            summary = summary_text
+            key_points = ""
+            if "KEY_POINTS" in summary_text:
+                parts = summary_text.split("KEY_POINTS", 1)
+                summary = parts[0].replace("SUMMARY", "").strip().strip(":")
+                key_points = parts[1].strip().strip(":")
+
+            await self.database.save_meeting_summary(
+                user_id=session.user_id,
+                call_id=session.call_id,
+                meeting_subject=session.meeting_subject,
+                summary=summary,
+                key_points=key_points,
+            )
+            logger.info(f"Meeting summary saved for call_id={session.call_id}")
+        except Exception as e:
+            logger.error(f"Failed to save meeting summary: {e}", exc_info=True)
 
     def get_session_by_user(self, user_id: str) -> MeetingSession | None:
         for session in self._sessions.values():
@@ -244,9 +284,41 @@ class MeetingTranscriptService:
 
         return suggestion
 
+    async def _build_meeting_context(self, session: MeetingSession) -> str:
+        """Build rich meeting context from user profile + meeting history + subject."""
+        parts = []
+        if session.meeting_subject:
+            parts.append(f"Current meeting: {session.meeting_subject}")
+
+        if self.database:
+            # Load user profile
+            profile = await self.database.get_user_profile(session.user_id)
+            if profile:
+                if profile.get("role"):
+                    session.user_role = profile["role"]  # override default
+                if profile.get("name"):
+                    session.user_name = profile["name"]
+                if profile.get("bio"):
+                    parts.append(f"About the user: {profile['bio']}")
+
+            # Load recent meeting history for context
+            recent = await self.database.get_recent_meetings(session.user_id, limit=3)
+            if recent:
+                parts.append("Recent meetings this user attended:")
+                for m in recent:
+                    line = f"- {m['meeting_subject'] or 'Untitled'}"
+                    if m.get("key_points"):
+                        line += f": {m['key_points']}"
+                    parts.append(line)
+
+        if not parts:
+            parts.append("General meeting")
+
+        return "\n".join(parts)
+
     async def _call_ollama(self, session: MeetingSession, transcript: str) -> str:
         """Build the prompt and call Ollama for a suggestion."""
-        meeting_context = session.meeting_subject or "General meeting"
+        meeting_context = await self._build_meeting_context(session)
 
         system_prompt = MEETING_SUGGESTION_SYSTEM_PROMPT.format(
             user_name=session.user_name,

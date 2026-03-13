@@ -48,6 +48,30 @@ class Database:
                     granted_at TEXT NOT NULL
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT '',
+                    bio TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS meeting_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    call_id TEXT NOT NULL,
+                    meeting_subject TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    key_points TEXT NOT NULL DEFAULT '',
+                    ended_at TEXT NOT NULL
+                )
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_meeting_history_user
+                ON meeting_history(user_id)
+            """)
             await db.commit()
 
     async def get_or_create_conversation(self, user_id: str) -> Conversation:
@@ -126,6 +150,60 @@ class Database:
                 "DELETE FROM conversations WHERE user_id = ?", (user_id,)
             )
             await db.commit()
+
+    # ── User Profiles ──
+
+    async def get_user_profile(self, user_id: str) -> dict | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return {"user_id": row["user_id"], "name": row["name"],
+                        "role": row["role"], "bio": row["bio"]}
+            return None
+
+    async def set_user_profile(self, user_id: str, name: str = "", role: str = "", bio: str = ""):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO user_profiles (user_id, name, role, bio, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    name = CASE WHEN ? != '' THEN ? ELSE name END,
+                    role = CASE WHEN ? != '' THEN ? ELSE role END,
+                    bio = CASE WHEN ? != '' THEN ? ELSE bio END,
+                    updated_at = ?
+            """, (user_id, name, role, bio, datetime.utcnow().isoformat(),
+                  name, name, role, role, bio, bio, datetime.utcnow().isoformat()))
+            await db.commit()
+
+    # ── Meeting History ──
+
+    async def save_meeting_summary(
+        self, user_id: str, call_id: str, meeting_subject: str,
+        summary: str, key_points: str
+    ):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO meeting_history (user_id, call_id, meeting_subject, summary, key_points, ended_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, call_id, meeting_subject, summary, key_points,
+                  datetime.utcnow().isoformat()))
+            await db.commit()
+
+    async def get_recent_meetings(self, user_id: str, limit: int = 5) -> list[dict]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT * FROM meeting_history WHERE user_id = ?
+                ORDER BY ended_at DESC LIMIT ?
+            """, (user_id, limit))
+            rows = await cursor.fetchall()
+            return [{"meeting_subject": r["meeting_subject"], "summary": r["summary"],
+                     "key_points": r["key_points"], "ended_at": r["ended_at"]}
+                    for r in rows]
 
     async def save_permission(self, user_id: str, directory: str):
         async with aiosqlite.connect(self.db_path) as db:

@@ -1,0 +1,18 @@
+Project: API Migration from v1 to v2
+Client: Acme Corp
+Demo date: Next Thursday
+Key deliverables:
+- Migrate all REST endpoints from Express to FastAPI
+- Payment module has legacy dependencies on Stripe v2 SDK
+- Frontend webhook handlers need updating for new payload format
+- Database schema migration is complete, rollback procedure needs review
+
+My responsibilities:
+- Frontend webhook integration
+- Schema rollback procedure review
+- End-to-end testing of payment flow
+
+Important notes:
+- The client is sensitive about downtime — emphasize zero-downtime migration
+- Budget is tight, avoid suggesting additional tooling purchases
+- Raj is the backend lead, Priya is the PM

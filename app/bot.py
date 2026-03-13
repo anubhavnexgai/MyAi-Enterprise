@@ -12,6 +12,7 @@ from app.config import permissions_config
 from app.security.permissions import auth_service, permission_manager
 from app.services.meeting_transcript import MeetingTranscriptService
 from app.services.web_search import WebSearchService
+from app.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,13 @@ class MyAiBot(ActivityHandler):
         search_service: WebSearchService,
         graph_client=None,
         meeting_service: MeetingTranscriptService | None = None,
+        database: Database | None = None,
     ):
         self.agent = agent
         self.search_service = search_service
         self.graph_client = graph_client
         self.meeting_service = meeting_service
+        self.database = database
         # Stores context for pending /join calls so the calling webhook
         # can associate the call_id with user info and conversation ref
         self._pending_join_context: dict[str, dict] = {}
@@ -87,6 +90,7 @@ class MyAiBot(ActivityHandler):
                 "**MyAi Commands**\n\n"
                 "- `/model <name>` -- Switch Ollama model\n"
                 "- `/status` -- Show current config and health\n"
+                "- `/profile <info>` -- Set your profile (name, role, bio)\n"
                 "- `/allow <path>` -- Grant file access to a directory\n"
                 "- `/revoke` -- Revoke all file permissions\n"
                 "- `/search on|off` -- Toggle web search\n"
@@ -170,6 +174,53 @@ class MyAiBot(ActivityHandler):
             await self.agent.db.clear_conversation(user_id)
             return "✅ Conversation history cleared."
             
+        elif command == "/profile":
+            if not self.database:
+                return "Database not configured."
+            if not arg:
+                # Show current profile
+                profile = await self.database.get_user_profile(user_id)
+                if profile and any(profile.get(k) for k in ("name", "role", "bio")):
+                    return (
+                        f"**Your Profile**\n\n"
+                        f"**Name:** {profile.get('name') or '(not set)'}\n"
+                        f"**Role:** {profile.get('role') or '(not set)'}\n"
+                        f"**Bio:** {profile.get('bio') or '(not set)'}\n\n"
+                        "Update with: `/profile name:<your name> role:<your role> bio:<about you>`"
+                    )
+                return (
+                    "No profile set yet. Set one with:\n\n"
+                    "`/profile name:Anubhav role:Software Engineer bio:I work on frontend and API integrations at Acme Corp`"
+                )
+
+            # Parse key:value pairs from the argument
+            name = role = bio = ""
+            # Support "name:X role:Y bio:Z" format
+            import re as _re
+            name_m = _re.search(r'name:\s*([^|]+?)(?=\s+(?:role|bio):|$)', arg)
+            role_m = _re.search(r'role:\s*([^|]+?)(?=\s+(?:name|bio):|$)', arg)
+            bio_m = _re.search(r'bio:\s*(.+)', arg)
+            if name_m:
+                name = name_m.group(1).strip()
+            if role_m:
+                role = role_m.group(1).strip()
+            if bio_m:
+                bio = bio_m.group(1).strip()
+
+            # If no key:value format detected, treat entire arg as bio
+            if not name and not role and not bio:
+                bio = arg.strip()
+
+            await self.database.set_user_profile(user_id, name=name or user_name, role=role, bio=bio)
+            profile = await self.database.get_user_profile(user_id)
+            return (
+                f"Profile updated!\n\n"
+                f"**Name:** {profile.get('name', '')}\n"
+                f"**Role:** {profile.get('role', '')}\n"
+                f"**Bio:** {profile.get('bio', '')}\n\n"
+                "This info will be used when suggesting responses in meetings."
+            )
+
         elif command == "/join":
             if not self.graph_client:
                 return "Graph Client not configured."
@@ -253,12 +304,16 @@ class MyAiBot(ActivityHandler):
                 "service_url": turn_context.activity.service_url,
                 "conversation_id": turn_context.activity.conversation.id,
             }
+            logger.info(f"Join returned call_id: {call_id}")
             self._pending_join_context[call_id] = {
                 "user_id": user_id,
                 "user_name": user_name,
                 "meeting_subject": meeting_subject,
                 "conversation_reference": conv_ref,
             }
+            # Also store under a generic key so the calling webhook can find it
+            # even if Graph uses a different call_id in notifications
+            self._pending_join_context["_latest"] = self._pending_join_context[call_id]
 
             await turn_context.send_activity(
                 "I've joined the meeting automatically. "

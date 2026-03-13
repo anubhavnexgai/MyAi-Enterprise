@@ -258,7 +258,11 @@ class GraphClient:
                 logger.info(f"Proactive message sent to conversation {conversation_id}")
 
     async def _get_bot_token(self) -> str:
-        """Get a Bot Framework token for proactive messaging (cached)."""
+        """Get a Bot Framework token for proactive messaging (cached).
+
+        Uses the tenant-specific token endpoint so the token is accepted
+        by regional service URLs (e.g. smba.trafficmanager.net).
+        """
         import time
         if self._bot_token_cache:
             token, expiry = self._bot_token_cache
@@ -267,7 +271,7 @@ class GraphClient:
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token",
+                self.token_url,  # tenant-specific endpoint
                 data={
                     "grant_type": "client_credentials",
                     "client_id": self.client_id,

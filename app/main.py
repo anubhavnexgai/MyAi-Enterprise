@@ -65,6 +65,7 @@ meeting_service = MeetingTranscriptService(
     ollama=ollama_client,
     deliver_fn=_deliver_suggestion,
     graph_client=graph_client,
+    database=database,
 )
 
 # ── Initialize agent ──
@@ -78,7 +79,7 @@ adapter_settings = BotFrameworkAdapterSettings(
     channel_auth_tenant=settings.microsoft_app_tenant_id or None,
 )
 adapter = BotFrameworkAdapter(adapter_settings)
-bot = MyAiBot(agent, search_service, graph_client, meeting_service)
+bot = MyAiBot(agent, search_service, graph_client, meeting_service, database)
 
 
 # ── Error handler ──
@@ -133,10 +134,23 @@ async def calling(req: web.Request) -> web.Response:
             "Content-Type": "application/json",
         }
 
-        for event in body.get("value", []):
+        for event in body.get("value", [body]):
             resource_data = event.get("resourceData", {})
+            # resourceData can sometimes be a list — skip those
+            if isinstance(resource_data, list):
+                logger.warning(f"resourceData is a list, skipping: {resource_data}")
+                continue
             state = resource_data.get("state")
+            # call_id can be in resourceData.id, or parsed from the resource URL
             call_id = resource_data.get("id")
+            if not call_id:
+                # Try to extract from resource URL: /communications/calls/{id}
+                resource_url = event.get("resource", "")
+                import re
+                m = re.search(r'/communications/calls/([^/]+)', resource_url)
+                if m:
+                    call_id = m.group(1)
+            logger.info(f"Calling event: state={state}, call_id={call_id}, changeType={event.get('changeType')}")
 
             # 1. Answer an Incoming Call
             if event.get("changeType") == "created" and state == "incoming":
@@ -173,7 +187,8 @@ async def calling(req: web.Request) -> web.Response:
 
                 # Start a meeting session if we don't have one yet
                 if not meeting_service.get_session(call_id):
-                    session_info = getattr(bot, "_pending_join_context", {}).get(call_id, {})
+                    pending = getattr(bot, "_pending_join_context", {})
+                    session_info = pending.get(call_id) or pending.get("_latest", {})
                     meeting_service.start_session(
                         call_id=call_id,
                         user_id=session_info.get("user_id", "unknown"),
@@ -277,6 +292,63 @@ async def transcript_webhook(req: web.Request) -> web.Response:
         return web.Response(status=500)
 
 
+async def simulate_transcript(req: web.Request) -> web.Response:
+    """Dev-only endpoint: inject transcript text and immediately generate a suggestion."""
+    try:
+        body = await req.json()
+        transcript_text = body.get("transcript_text", "")
+        if not transcript_text:
+            return web.json_response({"error": "transcript_text is required"}, status=400)
+
+        sessions = meeting_service.active_sessions
+        if not sessions:
+            return web.json_response({"error": "No active meeting session"}, status=404)
+
+        results = []
+        for call_id, session in sessions.items():
+            # Parse and append transcript lines directly (skip debounce)
+            new_lines = meeting_service._parse_transcript_text(transcript_text)
+            if new_lines:
+                session.transcript_lines.extend(new_lines)
+
+            # Force generate a suggestion immediately (no debounce)
+            # Reset hash/time so it doesn't skip
+            session.last_suggestion_hash = ""
+            session.last_suggestion_time = 0.0
+
+            suggestion = await meeting_service.generate_and_deliver(session)
+            results.append({
+                "call_id": call_id,
+                "lines_added": len(new_lines) if new_lines else 0,
+                "total_lines": len(session.transcript_lines),
+                "suggestion": suggestion or "(no suggestion generated)",
+                "conversation_ref": session.conversation_reference,
+            })
+
+        return web.json_response({"status": "ok", "results": results})
+    except Exception as e:
+        logger.error(f"Simulate transcript error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def debug_sessions(req: web.Request) -> web.Response:
+    """Dev-only endpoint: inspect active meeting sessions."""
+    sessions = meeting_service.active_sessions
+    data = []
+    for call_id, s in sessions.items():
+        data.append({
+            "call_id": call_id,
+            "user_name": s.user_name,
+            "user_role": s.user_role,
+            "meeting_subject": s.meeting_subject,
+            "meeting_id": s.meeting_id,
+            "conversation_reference": s.conversation_reference,
+            "transcript_line_count": len(s.transcript_lines),
+            "last_suggestion": s.last_suggestion[:200] if s.last_suggestion else None,
+        })
+    return web.json_response({"active_sessions": data})
+
+
 def _resolve_call_id_from_resource(resource_url: str) -> str | None:
     """Try to extract a call ID from a Graph resource URL and match to an active session."""
     # Resource URLs look like: communications/onlineMeetings/{id}/transcripts/{id}
@@ -308,6 +380,8 @@ def create_app() -> web.Application:
     app.router.add_get("/health", health)
     app.router.add_post("/api/calling", calling)
     app.router.add_post("/api/transcript-webhook", transcript_webhook)
+    app.router.add_post("/api/simulate-transcript", simulate_transcript)
+    app.router.add_get("/api/debug/sessions", debug_sessions)
     app.on_startup.append(on_startup)
     return app
 
