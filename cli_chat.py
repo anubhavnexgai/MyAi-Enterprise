@@ -180,8 +180,8 @@ async def main():
         # Send to agent
         print("  ⏳ Thinking...")
         try:
-            response = await agent.process_message(USER_ID, user_input)
-            print(f"\nMyAi: {response}\n")
+            result = await agent.process_message(USER_ID, user_input)
+            print(f"\nMyAi: {result['text']}\n")
         except Exception as e:
             print(f"\n❌ Error: {e}\n")
 

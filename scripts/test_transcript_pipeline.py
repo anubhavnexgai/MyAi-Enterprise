@@ -1,13 +1,7 @@
-"""Diagnose whether the bot can read live meeting transcripts.
+"""Diagnose whether the bot is running and can process transcripts.
 
 Usage:
     python scripts/test_transcript_pipeline.py
-
-Checks:
-1. Graph API token works
-2. Bot can list online meetings
-3. Bot can access transcript resources
-4. Webhook subscription can be created
 """
 
 import asyncio
@@ -15,142 +9,95 @@ import sys
 sys.path.insert(0, ".")
 
 import httpx
-from app.config import settings
 
 
 async def main():
     print("=" * 60)
-    print("TRANSCRIPT PIPELINE DIAGNOSTIC")
+    print("TRANSCRIPT PIPELINE DIAGNOSTIC (Slack)")
     print("=" * 60)
 
-    client_id = settings.microsoft_app_id
-    client_secret = settings.microsoft_app_password
-    tenant_id = settings.microsoft_app_tenant_id
-    callback_host = settings.callback_host
+    base_url = "http://localhost:8001"
 
-    # Step 1: Get Graph token
-    print("\n[1] Getting Graph API token...")
+    # Step 1: Check health
+    print(f"\n[1] Checking bot health at {base_url}...")
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "scope": "https://graph.microsoft.com/.default",
-                "grant_type": "client_credentials",
-            },
-        )
-        if resp.status_code != 200:
-            print(f"  FAIL: {resp.status_code} {resp.text[:200]}")
+        try:
+            resp = await client.get(f"{base_url}/health", timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                print(f"  OK: status={data.get('status')}, ollama={data.get('ollama')}, model={data.get('model')}")
+            else:
+                print(f"  FAIL: {resp.status_code}")
+                return
+        except Exception as e:
+            print(f"  FAIL: Bot not reachable -- {e}")
+            print(f"  Start the bot: python -m app.main")
             return
-        token = resp.json()["access_token"]
-        print(f"  OK: Got token")
 
-    headers = {"Authorization": f"Bearer {token}"}
-
-    # Step 2: Check Graph API permissions
-    print("\n[2] Checking Graph API permissions...")
+    # Step 2: Check active sessions
+    print(f"\n[2] Checking active transcript sessions...")
     async with httpx.AsyncClient() as client:
-        # Try to list online meetings (needs OnlineMeetings.Read.All)
-        resp = await client.get(
-            "https://graph.microsoft.com/v1.0/communications/onlineMeetings",
-            headers=headers,
-        )
-        if resp.status_code == 200:
-            meetings = resp.json().get("value", [])
-            print(f"  OK: Can list meetings ({len(meetings)} found)")
-        elif resp.status_code == 403:
-            print(f"  FAIL: 403 Forbidden — missing OnlineMeetings.Read.All permission")
-            print(f"  Response: {resp.text[:300]}")
-        else:
-            print(f"  WARN: {resp.status_code} — {resp.text[:200]}")
-
-    # Step 3: Check active sessions on the bot
-    print("\n[3] Checking active bot sessions...")
-    async with httpx.AsyncClient() as client:
-        resp = await client.get("http://localhost:8000/api/debug/sessions")
+        resp = await client.get(f"{base_url}/api/debug/sessions")
         data = resp.json()
         sessions = data.get("active_sessions", [])
         if not sessions:
-            print("  WARN: No active meeting sessions")
-            print("  → Join a meeting first with /join in Teams")
+            print("  WARN: No active transcript sessions")
+            print("  Start one in Slack: /transcript start My Meeting")
         else:
             for s in sessions:
-                print(f"  Session: call_id={s.get('call_id', '?')}")
+                print(f"  Session: call_id={s.get('call_id', '?')[:16]}...")
                 print(f"    user: {s.get('user_name')}")
-                print(f"    meeting_id: {s.get('meeting_id') or 'NOT RESOLVED'}")
+                print(f"    subject: {s.get('meeting_subject')}")
                 print(f"    transcript_lines: {s.get('transcript_line_count', 0)}")
-                print(f"    conversation_ref: {'OK' if s.get('conversation_reference', {}).get('service_url') else 'MISSING'}")
+                channel = s.get('conversation_reference', {}).get('channel_id')
+                print(f"    slack_channel: {channel or 'NOT SET'}")
 
-                meeting_id = s.get("meeting_id")
-                if meeting_id:
-                    # Step 4: Try to fetch transcripts for this meeting
-                    print(f"\n[4] Fetching transcripts for meeting {meeting_id[:20]}...")
-                    async with httpx.AsyncClient() as client2:
-                        resp2 = await client2.get(
-                            f"https://graph.microsoft.com/v1.0/communications/onlineMeetings/{meeting_id}/transcripts",
-                            headers=headers,
-                        )
-                        if resp2.status_code == 200:
-                            transcripts = resp2.json().get("value", [])
-                            print(f"  OK: {len(transcripts)} transcript(s) available")
-                            for t in transcripts:
-                                print(f"    - id: {t.get('id')}, created: {t.get('createdDateTime')}")
-                        elif resp2.status_code == 403:
-                            print(f"  FAIL: 403 Forbidden — missing OnlineMeetings.Read.All or CallRecords permissions")
-                            print(f"  → Go to Azure Portal > App Registration > API Permissions")
-                            print(f"  → Add: OnlineMeetings.Read.All (Application)")
-                            print(f"  → Add: OnlineMeetingTranscript.Read.All (Application)")
-                            print(f"  → Click 'Grant admin consent'")
-                        elif resp2.status_code == 404:
-                            print(f"  WARN: Meeting not found — may have ended or ID is wrong")
-                        else:
-                            print(f"  WARN: {resp2.status_code} — {resp2.text[:200]}")
-                else:
-                    print(f"\n[4] Cannot check transcripts — meeting_id not resolved")
-                    print(f"  This means the bot joined but couldn't map the call to an online meeting")
-                    print(f"  Transcript polling will NOT work without a meeting_id")
+    # Step 3: Check Slack env vars
+    print(f"\n[3] Checking Slack configuration...")
+    from app.config import settings
+    has_bot_token = bool(settings.slack_bot_token and settings.slack_bot_token.startswith("xoxb-"))
+    has_app_token = bool(settings.slack_app_token and settings.slack_app_token.startswith("xapp-"))
+    has_signing = bool(settings.slack_signing_secret)
 
-    # Step 5: Check if callback host is reachable
-    print(f"\n[5] Checking callback host...")
-    if not callback_host:
-        print(f"  WARN: CALLBACK_HOST not set in .env")
+    print(f"  SLACK_BOT_TOKEN: {'OK' if has_bot_token else 'MISSING or invalid (needs xoxb-...)'}")
+    print(f"  SLACK_APP_TOKEN: {'OK' if has_app_token else 'MISSING or invalid (needs xapp-...)'}")
+    print(f"  SLACK_SIGNING_SECRET: {'OK' if has_signing else 'MISSING'}")
+
+    if not has_bot_token or not has_app_token:
+        print(f"\n  To set up Slack:")
+        print(f"  1. Go to api.slack.com/apps and create/select your app")
+        print(f"  2. Enable Socket Mode -> get an App-Level Token (xapp-...)")
+        print(f"  3. OAuth & Permissions -> install to workspace -> get Bot Token (xoxb-...)")
+        print(f"  4. Event Subscriptions -> subscribe to: message.im, app_mention")
+        print(f"  5. Add these to your .env file")
+
+    # Step 4: Test simulate endpoint
+    print(f"\n[4] Testing simulate endpoint...")
+    if sessions:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{base_url}/api/simulate-transcript",
+                json={"transcript_text": "Test: Hello, can everyone hear me?"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for r in data.get("results", []):
+                    print(f"  OK: Got suggestion ({len(r.get('suggestion', ''))} chars)")
+                    print(f"  Preview: {r.get('suggestion', '')[:100]}")
+            else:
+                print(f"  WARN: {resp.status_code} -- {resp.text[:200]}")
     else:
-        print(f"  Configured: {callback_host}")
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.get(f"{callback_host.rstrip('/')}/health", timeout=10)
-                print(f"  OK: Reachable ({resp.status_code})")
-            except Exception as e:
-                print(f"  WARN: Not reachable — {e}")
-                print(f"  → Make sure ngrok is running: ngrok http 8000")
-
-    # Step 6: Check required Azure permissions
-    print(f"\n[6] Required Azure API Permissions (Application type):")
-    print(f"  Go to: Azure Portal > App Registrations > {client_id} > API Permissions")
-    print(f"  Required permissions:")
-    print(f"    - Calls.JoinGroupCall.All        (to join meetings)")
-    print(f"    - Calls.InitiateGroupCall.All    (to initiate calls)")
-    print(f"    - OnlineMeetings.Read.All        (to list/read meetings)")
-    print(f"    - OnlineMeetingTranscript.Read.All (to read transcripts)")
-    print(f"  All must have 'Admin consent granted' status = Yes")
-
-    # Step 7: Check Teams transcription policy
-    print(f"\n[7] Teams Transcription Policy:")
-    print(f"  Go to: Teams Admin Center > Meetings > Meeting policies")
-    print(f"  Ensure 'Transcription' is set to ON for your policy")
-    print(f"  Without this, no transcripts are generated in meetings")
+        print("  SKIP: No active sessions to test with")
 
     print(f"\n{'=' * 60}")
     print(f"SUMMARY")
     print(f"{'=' * 60}")
-    print(f"For live transcripts to work, ALL of these must be true:")
-    print(f"  1. Bot joins meeting (via /join) .................. check with /join")
-    print(f"  2. Transcription enabled in Teams policy ......... check Teams Admin Center")
-    print(f"  3. Someone starts transcription in the meeting ... click 'Start transcription' in meeting")
-    print(f"  4. Graph API permissions granted ................. check Azure Portal")
-    print(f"  5. meeting_id resolved ........................... check debug/sessions endpoint")
-    print(f"  6. ngrok tunnel active ........................... check CALLBACK_HOST")
+    print(f"For transcript suggestions to work:")
+    print(f"  1. Bot is running .................. python -m app.main")
+    print(f"  2. Slack tokens configured ......... check .env file")
+    print(f"  3. Ollama is running ............... ollama serve")
+    print(f"  4. Start a session ................. /transcript start My Meeting")
+    print(f"  5. Paste transcript text ........... /transcript paste <text>")
 
 
 if __name__ == "__main__":

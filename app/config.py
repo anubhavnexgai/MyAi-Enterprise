@@ -11,10 +11,10 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    # Azure Bot
-    microsoft_app_id: str = ""
-    microsoft_app_password: str = ""
-    microsoft_app_tenant_id: str = ""
+    # Slack
+    slack_bot_token: str = ""       # xoxb-...
+    slack_app_token: str = ""       # xapp-...
+    slack_signing_secret: str = ""
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
@@ -22,9 +22,9 @@ class Settings(BaseSettings):
     ollama_embed_model: str = "nomic-embed-text"
     ollama_timeout: int = 120
 
-    # Server
+    # Server (debug HTTP server for simulate script)
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8001
 
     # Security
     allowed_users: str = "*"
@@ -40,12 +40,32 @@ class Settings(BaseSettings):
     database_path: str = "data/miai.db"
     chroma_path: str = "data/chroma"
 
+    # Microsoft Graph (delegated auth for employee scenarios)
+    graph_client_id: str = ""       # Azure App Registration client ID
+    graph_client_secret: str = ""   # Azure App Registration client secret
+    graph_tenant_id: str = ""       # Azure tenant ID (or "common" for multi-tenant)
+    graph_redirect_uri: str = "http://localhost:8001/auth/callback"
+
+    # NexgAI Integration
+    nexgai_enabled: bool = False
+    nexgai_base_url: str = "http://localhost:8000"
+    nexgai_tenant_id: str = "default"
+    nexgai_service_user: str = ""       # service account email for SSO
+    nexgai_service_password: str = ""   # service account password
+    nexgai_timeout: int = 30
+    nexgai_stream_timeout: int = 120
+    nexgai_circuit_breaker_threshold: int = 3
+    nexgai_circuit_breaker_cooldown: int = 60
+    nexgai_agent_cache_ttl: int = 300   # seconds to cache agent list
+
+    # Self-Learning Loop (Phase 4)
+    learning_interval_hours: int = 6
+    learning_min_negative_feedback: int = 3  # min thumbs-down before engine generates suggestions
+
     # Meeting Transcript
     meeting_suggestion_debounce_seconds: int = 15
     meeting_transcript_max_chars: int = 12000
     meeting_suggestion_model: str = ""  # empty = use default ollama_model
-    callback_host: str = ""  # e.g. https://xxxx.ngrok-free.app (for calling/transcript webhooks)
-    transcript_webhook_secret: str = "miai-transcript-secret"  # clientState for Graph subscription validation
 
     @property
     def allowed_user_list(self) -> list[str] | None:

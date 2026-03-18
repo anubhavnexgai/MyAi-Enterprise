@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyAi — Learning Dashboard</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #0f0f0f; --bg2: #1a1a1a; --bg3: #242424;
+            --text: #e8e8e8; --text2: #999; --muted: #666;
+            --accent: #6c63ff; --accent-dim: rgba(108,99,255,0.15);
+            --success: #34d399; --danger: #f87171; --warning: #fbbf24;
+        }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 24px; }
+        h1 { margin-bottom: 8px; }
+        .subtitle { color: var(--text2); margin-bottom: 24px; }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        .nav { display: flex; gap: 16px; margin-bottom: 24px; }
+        .nav a { padding: 8px 16px; border-radius: 6px; background: var(--bg2); }
+        .nav a.active { background: var(--accent-dim); border: 1px solid var(--accent); }
+
+        .stats-row { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+        .stat-card { background: var(--bg2); border-radius: 8px; padding: 16px 20px; min-width: 150px; }
+        .stat-value { font-size: 28px; font-weight: 600; }
+        .stat-label { color: var(--text2); font-size: 13px; margin-top: 4px; }
+        .stat-value.positive { color: var(--success); }
+        .stat-value.negative { color: var(--danger); }
+
+        .section { margin-bottom: 32px; }
+        .section h2 { margin-bottom: 12px; font-size: 18px; }
+
+        table { width: 100%; border-collapse: collapse; background: var(--bg2); border-radius: 8px; overflow: hidden; }
+        th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--bg3); }
+        th { background: var(--bg3); color: var(--text2); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        td { font-size: 13px; }
+        tr:last-child td { border-bottom: none; }
+
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .badge-pending { background: rgba(251,191,36,0.15); color: var(--warning); }
+        .badge-approved { background: rgba(52,211,153,0.15); color: var(--success); }
+        .badge-rejected { background: rgba(248,113,113,0.15); color: var(--danger); }
+
+        .btn { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+        .btn-approve { background: var(--success); color: #000; }
+        .btn-reject { background: var(--danger); color: #fff; }
+        .btn:disabled { opacity: 0.5; cursor: default; }
+        .btn + .btn { margin-left: 6px; }
+
+        .empty { color: var(--muted); text-align: center; padding: 32px; }
+        .truncate { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .filter-row { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
+        .filter-row select { background: var(--bg3); color: var(--text); border: 1px solid var(--muted); border-radius: 4px; padding: 6px 10px; }
+        #loading { color: var(--text2); padding: 20px; text-align: center; }
+    </style>
+</head>
+<body>
+    <h1>Learning Dashboard</h1>
+    <p class="subtitle"><a href="/admin">&larr; Admin</a> &middot; Self-learning loop: feedback analysis &amp; prompt optimization</p>
+
+    <div class="nav">
+        <a href="#" class="active" data-tab="pending">Pending Approvals</a>
+        <a href="#" data-tab="history">History</a>
+        <a href="#" data-tab="satisfaction">Satisfaction</a>
+        <a href="#" data-tab="prompts">Prompt Versions</a>
+    </div>
+
+    <div class="stats-row" id="stats-row"></div>
+
+    <!-- Pending Tab -->
+    <div class="section tab-content" id="tab-pending">
+        <h2>Pending Approvals</h2>
+        <div id="pending-table"></div>
+    </div>
+
+    <!-- History Tab -->
+    <div class="section tab-content" id="tab-history" style="display:none">
+        <h2>Learning History</h2>
+        <div class="filter-row">
+            <select id="filter-status">
+                <option value="">All Status</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+            </select>
+            <select id="filter-type">
+                <option value="">All Types</option>
+                <option value="prompt_refinement">Prompt Refinement</option>
+                <option value="response_improvement">Response Improvement</option>
+                <option value="knowledge_expansion">Knowledge Expansion</option>
+            </select>
+        </div>
+        <div id="history-table"></div>
+    </div>
+
+    <!-- Satisfaction Tab -->
+    <div class="section tab-content" id="tab-satisfaction" style="display:none">
+        <h2>Satisfaction Trend</h2>
+        <div id="satisfaction-chart"></div>
+    </div>
+
+    <!-- Prompts Tab -->
+    <div class="section tab-content" id="tab-prompts" style="display:none">
+        <h2>Prompt Version History</h2>
+        <div id="prompts-table"></div>
+    </div>
+
+    <script>
+    (function() {
+        var token = localStorage.getItem("myai_auth_token");
+        if (!token) { location.href = "/"; return; }
+        var headers = { "Authorization": "Bearer " + token };
+
+        // Tab switching
+        document.querySelectorAll(".nav a").forEach(function(a) {
+            a.addEventListener("click", function(e) {
+                e.preventDefault();
+                document.querySelectorAll(".nav a").forEach(function(x) { x.classList.remove("active"); });
+                a.classList.add("active");
+                document.querySelectorAll(".tab-content").forEach(function(t) { t.style.display = "none"; });
+                document.getElementById("tab-" + a.dataset.tab).style.display = "block";
+                if (a.dataset.tab === "history") loadHistory();
+                if (a.dataset.tab === "satisfaction") loadSatisfaction();
+                if (a.dataset.tab === "prompts") loadPrompts();
+            });
+        });
+
+        // Load stats
+        fetch("/api/feedback/stats?period_hours=168", { headers: headers })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var row = document.getElementById("stats-row");
+                row.innerHTML =
+                    card(d.total_feedback || d.total || 0, "Total Feedback (7d)") +
+                    card(d.thumbs_up || 0, "Thumbs Up", "positive") +
+                    card(d.thumbs_down || 0, "Thumbs Down", "negative") +
+                    card((d.satisfaction_pct || 0) + "%", "Satisfaction", d.satisfaction_pct >= 70 ? "positive" : "negative");
+            }).catch(function() {});
+
+        function card(val, label, cls) {
+            return '<div class="stat-card"><div class="stat-value ' + (cls||'') + '">' + val + '</div><div class="stat-label">' + label + '</div></div>';
+        }
+
+        // Load pending
+        loadPending();
+
+        function loadPending() {
+            fetch("/api/admin/learning/pending", { headers: headers })
+                .then(function(r) { return r.json(); })
+                .then(function(d) { renderEntries("pending-table", d.entries || [], true); })
+                .catch(function() { document.getElementById("pending-table").innerHTML = '<div class="empty">Failed to load</div>'; });
+        }
+
+        function loadHistory() {
+            var status = document.getElementById("filter-status").value;
+            var type = document.getElementById("filter-type").value;
+            var url = "/api/admin/learning/history?limit=50";
+            if (status) url += "&status=" + status;
+            if (type) url += "&type=" + type;
+            fetch(url, { headers: headers })
+                .then(function(r) { return r.json(); })
+                .then(function(d) { renderEntries("history-table", d.entries || [], false); })
+                .catch(function() {});
+        }
+
+        document.getElementById("filter-status").addEventListener("change", loadHistory);
+        document.getElementById("filter-type").addEventListener("change", loadHistory);
+
+        function renderEntries(containerId, entries, showActions) {
+            var el = document.getElementById(containerId);
+            if (!entries.length) { el.innerHTML = '<div class="empty">No entries</div>'; return; }
+            var html = '<table><thead><tr><th>Type</th><th>Source</th><th>Suggestion</th><th>Status</th>';
+            if (showActions) html += '<th>Actions</th>';
+            html += '<th>Created</th></tr></thead><tbody>';
+            entries.forEach(function(e) {
+                var badge = '<span class="badge badge-' + e.status + '">' + e.status + '</span>';
+                html += '<tr><td>' + e.entry_type.replace(/_/g, ' ') + '</td>';
+                html += '<td>' + (e.agent_name || e.source) + '</td>';
+                html += '<td class="truncate" title="' + esc(e.suggested_improvement) + '">' + esc(e.suggested_improvement.substring(0, 100)) + '</td>';
+                html += '<td>' + badge + '</td>';
+                if (showActions) {
+                    html += '<td><button class="btn btn-approve" onclick="window._approveEntry(\'' + e.id + '\')">Approve</button>';
+                    html += '<button class="btn btn-reject" onclick="window._rejectEntry(\'' + e.id + '\')">Reject</button></td>';
+                }
+                html += '<td>' + (e.created_at || '').substring(0, 16) + '</td></tr>';
+            });
+            html += '</tbody></table>';
+            el.innerHTML = html;
+        }
+
+        window._approveEntry = function(id) {
+            fetch("/api/admin/learning/" + id + "/approve", { method: "POST", headers: headers })
+                .then(function() { loadPending(); })
+                .catch(function() { alert("Failed to approve"); });
+        };
+
+        window._rejectEntry = function(id) {
+            fetch("/api/admin/learning/" + id + "/reject", { method: "POST", headers: headers })
+                .then(function() { loadPending(); })
+                .catch(function() { alert("Failed to reject"); });
+        };
+
+        function loadSatisfaction() {
+            fetch("/api/admin/learning/satisfaction-trend?days=30", { headers: headers })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var el = document.getElementById("satisfaction-chart");
+                    var data = d.trend || [];
+                    if (!data.length) { el.innerHTML = '<div class="empty">No satisfaction data yet. Feedback will generate daily snapshots.</div>'; return; }
+                    var html = '<table><thead><tr><th>Date</th><th>Source</th><th>Total</th><th>Up</th><th>Down</th><th>Satisfaction</th></tr></thead><tbody>';
+                    data.forEach(function(s) {
+                        html += '<tr><td>' + s.snapshot_date + '</td><td>' + s.source + '</td><td>' + s.total_feedback + '</td>';
+                        html += '<td>' + s.thumbs_up + '</td><td>' + s.thumbs_down + '</td>';
+                        html += '<td>' + s.satisfaction_pct + '%</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                    el.innerHTML = html;
+                }).catch(function() {});
+        }
+
+        function loadPrompts() {
+            fetch("/api/admin/learning/prompt-versions", { headers: headers })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    var el = document.getElementById("prompts-table");
+                    var versions = d.versions || [];
+                    if (!versions.length) { el.innerHTML = '<div class="empty">No custom prompts yet. Using default system prompt.</div>'; return; }
+                    var html = '<table><thead><tr><th>Active</th><th>Created</th><th>Created By</th><th>Prompt (preview)</th></tr></thead><tbody>';
+                    versions.forEach(function(v) {
+                        var active = v.is_active ? '<span class="badge badge-approved">Active</span>' : '';
+                        html += '<tr><td>' + active + '</td><td>' + (v.created_at || '').substring(0, 16) + '</td>';
+                        html += '<td>' + (v.created_by || '') + '</td>';
+                        html += '<td class="truncate" title="' + esc(v.prompt_text) + '">' + esc(v.prompt_text.substring(0, 120)) + '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                    el.innerHTML = html;
+                }).catch(function() {});
+        }
+
+        function esc(s) { var d = document.createElement("div"); d.textContent = s || ""; return d.innerHTML; }
+    })();
+    </script>
+</body>
+</html>

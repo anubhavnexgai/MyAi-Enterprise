@@ -1,4 +1,4 @@
-"""Tests for the meeting transcript listener feature."""
+"""Tests for the meeting transcript service."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from app.services.meeting_transcript import (
 )
 
 
-# ── Fixtures ──
+# -- Fixtures --
 
 
 @pytest.fixture
@@ -63,13 +63,12 @@ def session(service):
         user_role="Engineer",
         meeting_subject="Sprint Planning",
         conversation_reference={
-            "service_url": "https://smba.trafficmanager.net/teams/",
-            "conversation_id": "conv-789",
+            "channel_id": "C12345",
         },
     )
 
 
-# ── Session Lifecycle Tests ──
+# -- Session Lifecycle Tests --
 
 
 class TestSessionLifecycle:
@@ -114,7 +113,7 @@ class TestSessionLifecycle:
         assert len(service.active_sessions) == 1
 
 
-# ── Transcript Parsing Tests ──
+# -- Transcript Parsing Tests --
 
 
 class TestTranscriptParsing:
@@ -154,7 +153,7 @@ Bob: Thanks for having me"""
         assert lines == ["Hello", "World"]
 
 
-# ── Rolling Context Tests ──
+# -- Rolling Context Tests --
 
 
 class TestRollingContext:
@@ -178,7 +177,7 @@ class TestRollingContext:
         assert result == ""
 
 
-# ── Suggestion Generation Tests ──
+# -- Suggestion Generation Tests --
 
 
 class TestSuggestionGeneration:
@@ -247,7 +246,7 @@ class TestSuggestionGeneration:
         mock_deliver.assert_not_called()
 
 
-# ── Delivery Tests ──
+# -- Delivery Tests --
 
 
 class TestDelivery:
@@ -278,7 +277,7 @@ class TestDelivery:
         assert suggestion is not None  # Suggestion generated but not delivered
 
 
-# ── Debounce / Batching Tests ──
+# -- Debounce / Batching Tests --
 
 
 class TestDebounce:
@@ -318,19 +317,18 @@ class TestDebounce:
         mock_ollama.chat.assert_not_called()
 
 
-# ── Edge Cases ──
+# -- Edge Cases --
 
 
 class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_bot_joins_mid_meeting(self, service, mock_ollama, mock_deliver):
-        """Bot joins after conversation has been going -- first transcript
-        block contains a lot of prior content."""
+        """Large initial transcript dump should be handled."""
         session = service.start_session(
             call_id="mid-join",
             user_id="user-1",
             user_name="Charlie",
-            conversation_reference={"service_url": "https://x", "conversation_id": "c1"},
+            conversation_reference={"channel_id": "C12345"},
         )
         # Simulate a large initial transcript dump
         prior_lines = [f"Speaker{i % 3}: Discussion point {i}" for i in range(100)]
@@ -378,7 +376,7 @@ class TestEdgeCases:
             mock_ollama.set_model.assert_called_with("llama3.1:8b")
 
 
-# ── Prompt Construction Tests ──
+# -- Prompt Construction Tests --
 
 
 class TestPromptConstruction:
@@ -406,164 +404,3 @@ class TestPromptConstruction:
 
         assert "Let's review the PR" in user_msg
         assert "Alice" in user_msg  # user_name in prompt
-
-
-# ── Polling Tests ──
-
-
-class TestPolling:
-    @pytest.fixture
-    def mock_graph(self):
-        """Create a mock GraphClient."""
-        client = MagicMock()
-        client.fetch_transcript_content = AsyncMock(return_value=[
-            {"id": "t-1", "content": "Alice: Hello from poll\nBob: Hi there"},
-        ])
-        return client
-
-    @pytest.fixture
-    def polling_service(self, mock_ollama, mock_deliver, mock_graph):
-        """Service with a graph client for polling."""
-        with patch("app.services.meeting_transcript.settings") as mock_settings:
-            mock_settings.meeting_suggestion_debounce_seconds = 0
-            mock_settings.meeting_transcript_max_chars = 500
-            mock_settings.meeting_suggestion_model = ""
-            svc = MeetingTranscriptService(
-                ollama=mock_ollama,
-                deliver_fn=mock_deliver,
-                graph_client=mock_graph,
-                poll_interval_seconds=0.1,
-            )
-            svc._debounce_seconds = 0
-        return svc
-
-    @pytest.mark.asyncio
-    async def test_poll_session_ingests_new_transcripts(self, polling_service, mock_graph, mock_ollama):
-        session = polling_service.start_session(
-            call_id="poll-call",
-            user_id="user-1",
-            user_name="Alice",
-            meeting_id="meeting-abc",
-        )
-        # Stop the auto-started poll loop to test _poll_session directly
-        if polling_service._poll_task:
-            polling_service._poll_task.cancel()
-
-        await polling_service._poll_session(session)
-
-        mock_graph.fetch_transcript_content.assert_called_once_with("meeting-abc")
-        assert len(session.transcript_lines) == 2
-        assert "t-1" in session.seen_transcript_ids
-
-    @pytest.mark.asyncio
-    async def test_poll_deduplicates_transcripts(self, polling_service, mock_graph, mock_ollama):
-        session = polling_service.start_session(
-            call_id="dedup-call",
-            user_id="user-1",
-            user_name="Alice",
-            meeting_id="meeting-xyz",
-        )
-        if polling_service._poll_task:
-            polling_service._poll_task.cancel()
-
-        # Poll twice -- second should not re-ingest
-        await polling_service._poll_session(session)
-        line_count_after_first = len(session.transcript_lines)
-
-        await polling_service._poll_session(session)
-        assert len(session.transcript_lines) == line_count_after_first
-
-    @pytest.mark.asyncio
-    async def test_poll_skips_sessions_without_meeting_id(self, polling_service, mock_graph):
-        session = polling_service.start_session(
-            call_id="no-mid",
-            user_id="user-1",
-            user_name="Alice",
-            meeting_id="",  # no meeting ID
-        )
-        if polling_service._poll_task:
-            polling_service._poll_task.cancel()
-
-        await polling_service._poll_session(session)
-        mock_graph.fetch_transcript_content.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_poll_handles_graph_failure(self, polling_service, mock_graph):
-        mock_graph.fetch_transcript_content.side_effect = Exception("Graph down")
-        session = polling_service.start_session(
-            call_id="fail-call",
-            user_id="user-1",
-            user_name="Alice",
-            meeting_id="meeting-fail",
-        )
-        if polling_service._poll_task:
-            polling_service._poll_task.cancel()
-
-        # Should not raise
-        await polling_service._poll_session(session)
-
-    @pytest.mark.asyncio
-    async def test_poll_loop_stops_on_end_session(self, polling_service):
-        polling_service.start_session(
-            call_id="loop-call",
-            user_id="user-1",
-            user_name="Alice",
-            meeting_id="meeting-loop",
-        )
-        # Poll task should have started
-        assert polling_service._poll_task is not None
-        assert not polling_service._poll_task.done()
-
-        polling_service.end_session("loop-call")
-        # With no sessions, poll task should be cancelled
-        assert polling_service._poll_task is None or polling_service._poll_task.done()
-
-    def test_no_poll_without_graph_client(self, mock_ollama, mock_deliver):
-        with patch("app.services.meeting_transcript.settings") as mock_settings:
-            mock_settings.meeting_suggestion_debounce_seconds = 0
-            mock_settings.meeting_transcript_max_chars = 500
-            mock_settings.meeting_suggestion_model = ""
-            svc = MeetingTranscriptService(
-                ollama=mock_ollama,
-                deliver_fn=mock_deliver,
-                graph_client=None,
-            )
-            svc._debounce_seconds = 0
-        svc.start_session(call_id="no-graph", user_id="u1", meeting_id="m1")
-        assert svc._poll_task is None
-
-
-# ── Token Caching Tests ──
-
-
-class TestTokenCaching:
-    @pytest.mark.asyncio
-    async def test_graph_token_cached(self):
-        from app.services.graph import GraphClient
-
-        with patch("app.services.graph.settings") as mock_settings:
-            mock_settings.microsoft_app_id = "test-id"
-            mock_settings.microsoft_app_password = "test-secret"
-            mock_settings.microsoft_app_tenant_id = "test-tenant"
-            mock_settings.transcript_webhook_secret = "secret"
-
-            client = GraphClient()
-
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"access_token": "tok-123", "expires_in": 3600}
-            mock_resp.raise_for_status = MagicMock()
-
-            with patch("httpx.AsyncClient") as mock_http:
-                mock_http_instance = AsyncMock()
-                mock_http_instance.post = AsyncMock(return_value=mock_resp)
-                mock_http_instance.__aenter__ = AsyncMock(return_value=mock_http_instance)
-                mock_http_instance.__aexit__ = AsyncMock(return_value=None)
-                mock_http.return_value = mock_http_instance
-
-                token1 = await client.get_access_token()
-                token2 = await client.get_access_token()
-
-                assert token1 == "tok-123"
-                assert token2 == "tok-123"
-                # Should only have made one HTTP call -- second was cached
-                assert mock_http_instance.post.call_count == 1

@@ -35,7 +35,7 @@ def _get_collection():
 
 
 class RAGService:
-    """Local RAG pipeline: chunk → embed (Ollama) → store (ChromaDB) → retrieve."""
+    """Local RAG pipeline: chunk -> embed (Ollama) -> store (ChromaDB) -> retrieve."""
 
     CHUNK_SIZE = 512
     CHUNK_OVERLAP = 64
@@ -53,8 +53,17 @@ class RAGService:
                 chunks.append(chunk)
         return chunks
 
-    async def index_file(self, file_path: str, content: str) -> int:
-        """Index a file's content into ChromaDB. Returns number of chunks."""
+    async def index_file(
+        self,
+        file_path: str,
+        content: str,
+        source_id: str | None = None,
+    ) -> int:
+        """Index a file's content into ChromaDB. Returns number of chunks.
+
+        When *source_id* is provided it is stored in each chunk's metadata so
+        that queries can later be scoped to specific data sources.
+        """
         collection = _get_collection()
         chunks = self._chunk_text(content)
 
@@ -67,10 +76,14 @@ class RAGService:
             chunk_id = hashlib.md5(f"{file_path}:{i}".encode()).hexdigest()
             embedding = await self.ollama.generate_embeddings(chunk)
 
+            meta: dict = {"source": file_path, "chunk_index": i}
+            if source_id is not None:
+                meta["source_id"] = source_id
+
             ids.append(chunk_id)
             embeddings.append(embedding)
             documents.append(chunk)
-            metadatas.append({"source": file_path, "chunk_index": i})
+            metadatas.append(meta)
 
         if ids:
             collection.upsert(
@@ -109,8 +122,17 @@ class RAGService:
 
         return f"Indexed {total_files} files ({total_chunks} chunks) from {dir_path}"
 
-    async def query(self, question: str, n_results: int = 5) -> str:
-        """Retrieve relevant chunks for a question."""
+    async def query(
+        self,
+        question: str,
+        n_results: int = 5,
+        source_ids: list[str] | None = None,
+    ) -> str:
+        """Retrieve relevant chunks for a question.
+
+        When *source_ids* is provided, results are filtered to only chunks
+        whose ``source_id`` metadata is in the given list.
+        """
         collection = _get_collection()
 
         if collection.count() == 0:
@@ -118,10 +140,15 @@ class RAGService:
 
         embedding = await self.ollama.generate_embeddings(question)
 
-        results = collection.query(
-            query_embeddings=[embedding],
-            n_results=min(n_results, collection.count()),
-        )
+        query_kwargs: dict = {
+            "query_embeddings": [embedding],
+            "n_results": min(n_results, collection.count()),
+        }
+
+        if source_ids:
+            query_kwargs["where"] = {"source_id": {"$in": source_ids}}
+
+        results = collection.query(**query_kwargs)
 
         if not results["documents"] or not results["documents"][0]:
             return "No relevant documents found."
@@ -134,3 +161,14 @@ class RAGService:
             context_parts.append(f"[Source: {source}]\n{doc}\n")
 
         return "\n".join(context_parts)
+
+    async def delete_source_chunks(self, source_id: str) -> None:
+        """Delete all ChromaDB chunks that belong to *source_id*."""
+        collection = _get_collection()
+        try:
+            collection.delete(where={"source_id": source_id})
+            logger.info("Deleted all chunks for source_id=%s", source_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to delete chunks for source_id=%s: %s", source_id, exc
+            )

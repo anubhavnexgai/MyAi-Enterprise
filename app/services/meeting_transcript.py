@@ -1,10 +1,7 @@
-"""Meeting transcript service: ingests live transcript lines, debounces,
+"""Meeting transcript service: ingests transcript lines, debounces,
 generates suggestions via Ollama, and delivers them to the user.
 
-Transcript acquisition uses two strategies:
-1. Graph webhook subscription (push) -- notifies when transcript resources appear
-2. Polling fallback -- periodically fetches transcript content from Graph
-Both feed into the same ingestion pipeline with dedup.
+Transcript text is fed in via the /transcript paste command in Slack.
 """
 
 from __future__ import annotations
@@ -24,7 +21,6 @@ from app.config import settings
 from app.services.ollama import OllamaClient
 
 if TYPE_CHECKING:
-    from app.services.graph import GraphClient
     from app.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -39,10 +35,8 @@ class MeetingSession:
     user_name: str = "User"
     user_role: str = "Participant"
     meeting_subject: str = ""
-    meeting_id: str = ""  # Graph onlineMeeting ID, for polling
     conversation_reference: dict = field(default_factory=dict)
     transcript_lines: list[str] = field(default_factory=list)
-    seen_transcript_ids: set[str] = field(default_factory=set)  # dedup fetched transcripts
     last_suggestion: str = ""
     last_suggestion_hash: str = ""
     last_suggestion_time: float = 0.0
@@ -51,7 +45,6 @@ class MeetingSession:
 
 def _content_hash(text: str) -> str:
     """Return a short hash of the meaningful content for dedup."""
-    # Normalize whitespace before hashing
     normalized = " ".join(text.split())
     return hashlib.md5(normalized.encode()).hexdigest()
 
@@ -63,21 +56,16 @@ class MeetingTranscriptService:
         self,
         ollama: OllamaClient,
         deliver_fn: Callable[[MeetingSession, str], Awaitable[None]] | None = None,
-        graph_client: GraphClient | None = None,
         database: Database | None = None,
-        poll_interval_seconds: int = 30,
     ):
         self.ollama = ollama
         self.deliver_fn = deliver_fn
-        self.graph_client = graph_client
         self.database = database
         self._sessions: dict[str, MeetingSession] = {}  # keyed by call_id
         self._debounce_seconds = settings.meeting_suggestion_debounce_seconds
         self._max_transcript_chars = settings.meeting_transcript_max_chars
-        self._poll_interval = poll_interval_seconds
-        self._poll_task: asyncio.Task | None = None
 
-    # ── Session lifecycle ──
+    # -- Session lifecycle --
 
     def start_session(
         self,
@@ -86,7 +74,6 @@ class MeetingTranscriptService:
         user_name: str = "User",
         user_role: str = "Participant",
         meeting_subject: str = "",
-        meeting_id: str = "",
         conversation_reference: dict | None = None,
     ) -> MeetingSession:
         session = MeetingSession(
@@ -95,14 +82,10 @@ class MeetingTranscriptService:
             user_name=user_name,
             user_role=user_role,
             meeting_subject=meeting_subject,
-            meeting_id=meeting_id,
             conversation_reference=conversation_reference or {},
         )
         self._sessions[call_id] = session
         logger.info(f"Meeting session started: call_id={call_id}, user={user_name}")
-
-        # Start the polling loop if we have a graph client and meeting_id
-        self._ensure_poll_loop()
         return session
 
     def get_session(self, call_id: str) -> MeetingSession | None:
@@ -114,13 +97,8 @@ class MeetingTranscriptService:
             session._pending_task.cancel()
         if session:
             logger.info(f"Meeting session ended: call_id={call_id}")
-            # Save meeting summary in the background
             if self.database and session.transcript_lines:
                 asyncio.create_task(self._save_meeting_summary(session))
-        # Stop poll loop if no more sessions need it
-        if not self._sessions and self._poll_task and not self._poll_task.done():
-            self._poll_task.cancel()
-            self._poll_task = None
 
     async def _save_meeting_summary(self, session: MeetingSession) -> None:
         """Generate and save a meeting summary when a session ends."""
@@ -137,7 +115,6 @@ class MeetingTranscriptService:
             result = await self.ollama.chat(messages=messages)
             summary_text = result.get("message", {}).get("content", "").strip()
 
-            # Split into summary and key points
             summary = summary_text
             key_points = ""
             if "KEY_POINTS" in summary_text:
@@ -166,15 +143,13 @@ class MeetingTranscriptService:
     def active_sessions(self) -> dict[str, MeetingSession]:
         return dict(self._sessions)
 
-    # ── Transcript ingestion ──
+    # -- Transcript ingestion --
 
     def get_rolling_transcript(self, session: MeetingSession) -> str:
         """Return the full transcript, trimmed to max chars from the end."""
         full = "\n".join(session.transcript_lines)
         if len(full) > self._max_transcript_chars:
-            # Keep the most recent portion
             full = full[-self._max_transcript_chars:]
-            # Trim to the next full line to avoid partial lines
             newline_idx = full.find("\n")
             if newline_idx != -1:
                 full = full[newline_idx + 1:]
@@ -191,7 +166,6 @@ class MeetingTranscriptService:
             logger.warning(f"No active session for call_id={call_id}, ignoring transcript")
             return
 
-        # Parse and append new lines (skip empty / VTT headers)
         new_lines = self._parse_transcript_text(transcript_text)
         if not new_lines:
             return
@@ -213,30 +187,27 @@ class MeetingTranscriptService:
         lines = []
         for line in raw.strip().splitlines():
             line = line.strip()
-            # Skip VTT metadata lines
             if not line:
                 continue
             if line.upper() == "WEBVTT":
                 continue
             if line.startswith("NOTE") or line.startswith("STYLE"):
                 continue
-            # Skip timestamp lines (e.g., "00:00:01.000 --> 00:00:05.000")
             if "-->" in line:
                 continue
-            # Skip purely numeric cue identifiers
             if line.isdigit():
                 continue
             lines.append(line)
         return lines
 
-    # ── Suggestion generation ──
+    # -- Suggestion generation --
 
     async def _debounced_suggest(self, session: MeetingSession) -> None:
         """Wait for debounce period, then generate and deliver suggestion."""
         try:
             await asyncio.sleep(self._debounce_seconds)
         except asyncio.CancelledError:
-            return  # New transcript arrived, timer reset
+            return
 
         await self.generate_and_deliver(session)
 
@@ -247,13 +218,11 @@ class MeetingTranscriptService:
             logger.info("Empty transcript, skipping suggestion")
             return None
 
-        # Check if transcript content meaningfully changed since last suggestion
         current_hash = _content_hash(transcript)
         if current_hash == session.last_suggestion_hash:
             logger.info("Transcript unchanged since last suggestion, skipping")
             return None
 
-        # Enforce minimum time gap
         now = time.time()
         elapsed = now - session.last_suggestion_time
         if elapsed < self._debounce_seconds and session.last_suggestion_hash:
@@ -265,7 +234,6 @@ class MeetingTranscriptService:
             logger.info("Model returned NO_SUGGESTION")
             return None
 
-        # Don't deliver duplicate suggestions
         suggestion_hash = _content_hash(suggestion)
         if suggestion_hash == _content_hash(session.last_suggestion):
             logger.info("Duplicate suggestion, skipping delivery")
@@ -275,7 +243,6 @@ class MeetingTranscriptService:
         session.last_suggestion_hash = current_hash
         session.last_suggestion_time = now
 
-        # Deliver
         if self.deliver_fn:
             try:
                 await self.deliver_fn(session, suggestion)
@@ -291,17 +258,15 @@ class MeetingTranscriptService:
             parts.append(f"Current meeting: {session.meeting_subject}")
 
         if self.database:
-            # Load user profile
             profile = await self.database.get_user_profile(session.user_id)
             if profile:
                 if profile.get("role"):
-                    session.user_role = profile["role"]  # override default
+                    session.user_role = profile["role"]
                 if profile.get("name"):
                     session.user_name = profile["name"]
                 if profile.get("bio"):
                     parts.append(f"About the user: {profile['bio']}")
 
-            # Load user's stored knowledge/context
             contexts = await self.database.get_all_contexts(session.user_id)
             if contexts:
                 parts.append("\n## User's Knowledge Base")
@@ -309,7 +274,6 @@ class MeetingTranscriptService:
                     parts.append(f"\n### {ctx['name']}")
                     parts.append(ctx['content'])
 
-            # Load recent meeting history for context
             recent = await self.database.get_recent_meetings(session.user_id, limit=3)
             if recent:
                 parts.append("\n## Recent meetings this user attended")
@@ -344,7 +308,6 @@ class MeetingTranscriptService:
             {"role": "user", "content": user_prompt},
         ]
 
-        # Use meeting-specific model if configured, otherwise default
         original_model = self.ollama.model
         suggestion_model = settings.meeting_suggestion_model
         if suggestion_model:
@@ -359,43 +322,3 @@ class MeetingTranscriptService:
         finally:
             if suggestion_model:
                 self.ollama.set_model(original_model)
-
-    # ── Polling fallback ──
-
-    def _ensure_poll_loop(self) -> None:
-        """Start the transcript polling loop if not already running."""
-        if not self.graph_client:
-            return
-        if self._poll_task and not self._poll_task.done():
-            return  # already running
-        self._poll_task = asyncio.create_task(self._poll_loop())
-
-    async def _poll_loop(self) -> None:
-        """Periodically poll Graph for new transcript content on active sessions."""
-        logger.info(f"Transcript polling loop started (interval={self._poll_interval}s)")
-        try:
-            while True:
-                await asyncio.sleep(self._poll_interval)
-                for session in list(self._sessions.values()):
-                    if not session.meeting_id:
-                        continue
-                    await self._poll_session(session)
-        except asyncio.CancelledError:
-            logger.info("Transcript polling loop stopped")
-
-    async def _poll_session(self, session: MeetingSession) -> None:
-        """Fetch transcript content for a session and ingest any new data."""
-        if not self.graph_client or not session.meeting_id:
-            return
-        try:
-            transcripts = await self.graph_client.fetch_transcript_content(session.meeting_id)
-            for t in transcripts:
-                t_id = t.get("id", "")
-                if t_id in session.seen_transcript_ids:
-                    continue
-                session.seen_transcript_ids.add(t_id)
-                content = t.get("content", "")
-                if content:
-                    await self.ingest_transcript(session.call_id, content)
-        except Exception as e:
-            logger.warning(f"Polling transcript for {session.call_id} failed: {e}")

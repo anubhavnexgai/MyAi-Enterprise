@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyAi Admin Dashboard</title>
+    <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+    <div class="topbar-left">
+        <span class="topbar-brand">MyAi</span>
+        <span class="topbar-badge">Admin</span>
+    </div>
+    <div class="topbar-right">
+        <span class="topbar-user" id="user-info">Loading...</span>
+        <a href="/" class="topbar-link">Back to Chat</a>
+        <button class="btn-logout" id="btn-logout" onclick="logout()">Logout</button>
+    </div>
+</div>
+
+<!-- Tab Navigation -->
+<nav class="tab-nav">
+    <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
+    <button class="tab-btn" data-tab="skills" onclick="switchTab('skills')">Skills</button>
+    <button class="tab-btn" data-tab="users" onclick="switchTab('users')">Users</button>
+    <button class="tab-btn" data-tab="datasources" onclick="switchTab('datasources')">Data Sources</button>
+    <button class="tab-btn" data-tab="errors" onclick="switchTab('errors')">Errors</button>
+    <button class="tab-btn" data-tab="system" onclick="switchTab('system')">System</button>
+</nav>
+
+<!-- Content -->
+<div class="content">
+
+    <!-- Overview Tab -->
+    <div class="tab-panel active" id="panel-overview">
+        <div class="section-header">
+            <div>
+                <div class="section-title">Dashboard Overview</div>
+                <div class="section-subtitle">Last 24 hours</div>
+            </div>
+        </div>
+
+        <div class="metric-grid" id="overview-metrics">
+            <div class="metric-card">
+                <div class="metric-label">Total Messages</div>
+                <div class="metric-value" id="metric-messages">--</div>
+            </div>
+            <div class="metric-card accent-success">
+                <div class="metric-label">Active Users</div>
+                <div class="metric-value" id="metric-active-users">--</div>
+            </div>
+            <div class="metric-card accent-purple">
+                <div class="metric-label">Skill Executions</div>
+                <div class="metric-value" id="metric-skill-execs">--</div>
+            </div>
+            <div class="metric-card accent-blue">
+                <div class="metric-label">Avg Response Time</div>
+                <div class="metric-value" id="metric-avg-response">--</div>
+                <div class="metric-sub">milliseconds</div>
+            </div>
+            <div class="metric-card accent-error">
+                <div class="metric-label">Error Rate</div>
+                <div class="metric-value" id="metric-error-rate">--</div>
+                <div class="metric-sub" id="metric-error-count"></div>
+            </div>
+            <div class="metric-card accent-warning">
+                <div class="metric-label">Conversations</div>
+                <div class="metric-value" id="metric-conversations">--</div>
+            </div>
+        </div>
+
+        <!-- Conversation Volume Chart -->
+        <div class="chart-container">
+            <div class="chart-title">Conversation Volume (7 days)</div>
+            <div id="volume-chart">
+                <div class="loading"><div class="spinner"></div> Loading chart data...</div>
+            </div>
+        </div>
+
+        <!-- Response Time Distribution -->
+        <div class="chart-container" style="margin-top: 16px;">
+            <div class="chart-title">Response Time Distribution</div>
+            <div class="percentile-grid" id="response-times">
+                <div class="loading"><div class="spinner"></div> Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Skills Tab -->
+    <div class="tab-panel" id="panel-skills">
+        <div class="section-header">
+            <div>
+                <div class="section-title">Skill Performance</div>
+                <div class="section-subtitle">Last 7 days</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="data-table" id="skills-table">
+                <thead>
+                    <tr>
+                        <th>Skill Name</th>
+                        <th>Executions</th>
+                        <th>Avg Confidence</th>
+                        <th>Avg Response (ms)</th>
+                        <th>Success Rate</th>
+                        <th>Thumbs Up</th>
+                        <th>Thumbs Down</th>
+                    </tr>
+                </thead>
+                <tbody id="skills-tbody">
+                    <tr><td colspan="7" class="muted" style="text-align:center;padding:32px;">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Users Tab -->
+    <div class="tab-panel" id="panel-users">
+        <div class="section-header">
+            <div>
+                <div class="section-title">User Management</div>
+                <div class="section-subtitle">All registered users</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="data-table" id="users-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Messages</th>
+                        <th>Last Active</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="users-tbody">
+                    <tr><td colspan="7" class="muted" style="text-align:center;padding:32px;">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Data Sources Tab -->
+    <div class="tab-panel" id="panel-datasources">
+        <div class="section-header">
+            <div>
+                <div class="section-title">Data Source Management</div>
+                <div class="section-subtitle">Company data connections</div>
+            </div>
+            <button class="btn-action btn-primary" onclick="showAddDataSourceForm()">+ Add Data Source</button>
+        </div>
+
+        <div id="ds-toast" class="ds-toast hidden"></div>
+
+        <div class="table-container">
+            <table class="data-table" id="datasources-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Documents</th>
+                        <th>Min Role</th>
+                        <th>Last Indexed</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="datasources-tbody">
+                    <tr><td colspan="7" class="muted" style="text-align:center;padding:32px;">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Data Source Modal -->
+    <div id="ds-modal" class="ds-modal-overlay hidden">
+        <div class="ds-modal">
+            <div class="ds-modal-header">
+                <h3 id="ds-modal-title">Add Data Source</h3>
+                <button class="ds-modal-close" onclick="closeDsModal()">&times;</button>
+            </div>
+            <div class="ds-modal-body">
+                <input type="hidden" id="ds-edit-id" value="">
+
+                <div class="ds-form-group">
+                    <label for="ds-name">Name</label>
+                    <input type="text" id="ds-name" class="ds-input" placeholder="e.g. Company Docs">
+                </div>
+
+                <div class="ds-form-group">
+                    <label for="ds-type">Source Type</label>
+                    <select id="ds-type" class="ds-select" onchange="onDsTypeChange()">
+                        <option value="local_directory">Local Directory</option>
+                        <option value="sql_database">SQL Database</option>
+                        <option value="sharepoint">SharePoint</option>
+                        <option value="rest_api">REST API</option>
+                    </select>
+                </div>
+
+                <!-- Dynamic config sections -->
+                <div id="ds-config-local_directory" class="ds-config-section">
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-directory_path">Directory Path</label>
+                        <input type="text" id="ds-cfg-directory_path" class="ds-input" placeholder="/path/to/documents">
+                    </div>
+                </div>
+
+                <div id="ds-config-sql_database" class="ds-config-section hidden">
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-connection_string">Connection String</label>
+                        <input type="text" id="ds-cfg-connection_string" class="ds-input" placeholder="postgresql://user:pass@host/db">
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-query">Query</label>
+                        <textarea id="ds-cfg-query" class="ds-textarea" rows="3" placeholder="SELECT id, content FROM documents"></textarea>
+                    </div>
+                </div>
+
+                <div id="ds-config-sharepoint" class="ds-config-section hidden">
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-client_id">Client ID</label>
+                        <input type="text" id="ds-cfg-client_id" class="ds-input" placeholder="Azure AD Client ID">
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-client_secret">Client Secret</label>
+                        <input type="password" id="ds-cfg-client_secret" class="ds-input" placeholder="Azure AD Client Secret">
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-tenant_id">Tenant ID</label>
+                        <input type="text" id="ds-cfg-tenant_id" class="ds-input" placeholder="Azure AD Tenant ID">
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-site_id">Site ID</label>
+                        <input type="text" id="ds-cfg-site_id" class="ds-input" placeholder="SharePoint Site ID">
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-folder_path">Folder Path</label>
+                        <input type="text" id="ds-cfg-folder_path" class="ds-input" placeholder="/Shared Documents/folder">
+                    </div>
+                </div>
+
+                <div id="ds-config-rest_api" class="ds-config-section hidden">
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-base_url">Base URL</label>
+                        <input type="text" id="ds-cfg-base_url" class="ds-input" placeholder="https://api.example.com">
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-auth_type">Auth Type</label>
+                        <select id="ds-cfg-auth_type" class="ds-select">
+                            <option value="api_key">API Key</option>
+                            <option value="bearer">Bearer Token</option>
+                            <option value="oauth2">OAuth2</option>
+                        </select>
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-auth_config">Auth Config (JSON)</label>
+                        <textarea id="ds-cfg-auth_config" class="ds-textarea" rows="3" placeholder='{"api_key": "..."}'></textarea>
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-endpoints">Endpoints (one per line)</label>
+                        <textarea id="ds-cfg-endpoints" class="ds-textarea" rows="3" placeholder="/v1/documents&#10;/v1/articles"></textarea>
+                    </div>
+                    <div class="ds-form-group">
+                        <label for="ds-cfg-response_text_field">Response Text Field</label>
+                        <input type="text" id="ds-cfg-response_text_field" class="ds-input" placeholder="content">
+                    </div>
+                </div>
+
+                <div class="ds-form-group">
+                    <label for="ds-min-role">Minimum Role Level</label>
+                    <select id="ds-min-role" class="ds-select">
+                        <option value="employee">Employee</option>
+                        <option value="manager">Manager</option>
+                        <option value="admin">Admin</option>
+                        <option value="super_admin">Super Admin</option>
+                    </select>
+                </div>
+            </div>
+            <div class="ds-modal-footer">
+                <button class="btn-action" onclick="closeDsModal()">Cancel</button>
+                <button class="btn-action btn-primary" onclick="saveDataSource()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Errors Tab -->
+    <div class="tab-panel" id="panel-errors">
+        <div class="section-header">
+            <div>
+                <div class="section-title">Error Log</div>
+                <div class="section-subtitle">Most recent errors</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table class="data-table" id="errors-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>User</th>
+                        <th>Type</th>
+                        <th>Skill</th>
+                        <th>Error Message</th>
+                    </tr>
+                </thead>
+                <tbody id="errors-tbody">
+                    <tr><td colspan="5" class="muted" style="text-align:center;padding:32px;">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- System Tab -->
+    <div class="tab-panel" id="panel-system">
+        <div class="section-header">
+            <div>
+                <div class="section-title">System Health</div>
+                <div class="section-subtitle">Real-time system metrics</div>
+            </div>
+        </div>
+
+        <div class="health-grid" id="system-health">
+            <div class="loading"><div class="spinner"></div> Loading system health...</div>
+        </div>
+    </div>
+
+</div>
+
+<script src="/static/admin.js"></script>
+</body>
+</html>

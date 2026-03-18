@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 class AuthService:
-    """Validates Teams user identity against the allowlist."""
+    """Validates user identity against the allowlist."""
 
     def is_user_allowed(self, user_id: str) -> bool:
         allowed = settings.allowed_user_list

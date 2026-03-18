@@ -4,7 +4,7 @@ Usage:
     python scripts/simulate_transcript.py [--host HOST] [--delay SECONDS] [--context FILE]
 
 Sends fake transcript chunks to the running bot. The bot generates suggestions
-via Ollama and returns them in the response (no Teams delivery needed for testing).
+via Ollama and returns them in the response (no Slack delivery needed for testing).
 """
 
 import argparse
@@ -51,7 +51,7 @@ async def send_chunk(base_url: str, chunk: str) -> dict:
             headers={"Content-Type": "application/json"},
         )
         if resp.status_code == 404:
-            return {"error": "No active session. Run /join first in Teams."}
+            return {"error": "No active session. Start one with /transcript start in Slack."}
         return resp.json()
 
 
@@ -64,7 +64,7 @@ async def check_sessions(base_url: str) -> dict:
 
 async def main():
     parser = argparse.ArgumentParser(description="Simulate live meeting transcript")
-    parser.add_argument("--host", default="http://localhost:8000", help="Bot server URL")
+    parser.add_argument("--host", default="http://localhost:8001", help="Debug server URL")
     parser.add_argument("--delay", type=float, default=5.0, help="Seconds between chunks")
     parser.add_argument("--context", type=str, default="", help="Path to a .txt context file")
     args = parser.parse_args()
@@ -77,7 +77,7 @@ async def main():
     if not active:
         print("\nERROR: No active meeting session!")
         print("1. Start the bot: python -m app.main")
-        print("2. In Teams chat with MyAi: /join <meeting-url>")
+        print("2. In Slack DM with MyAi: /transcript start My Meeting")
         print("3. Then re-run this script")
         return
 
@@ -85,7 +85,7 @@ async def main():
     for s in active:
         cid = s.get('call_id') or '(none)'
         print(f"  - {cid[:16]}... user={s.get('user_name', '?')} role={s.get('user_role', '?')}")
-        print(f"    transcript lines: {s.get('transcript_line_count', 0)}, ref: {bool(s.get('conversation_reference', {}).get('service_url'))}")
+        print(f"    transcript lines: {s.get('transcript_line_count', 0)}")
 
     chunks = list(SAMPLE_TRANSCRIPT_CHUNKS)
 
@@ -118,15 +118,15 @@ async def main():
             suggestion = r.get("suggestion", "")
             print(f"\n  Lines in session: {r.get('total_lines', '?')}")
             print(f"  SUGGESTION: {suggestion}")
-            has_ref = bool(r.get("conversation_ref", {}).get("service_url"))
-            print(f"  Teams delivery: {'enabled' if has_ref else 'DISABLED (no conversation ref)'}")
+            has_ref = bool(r.get("conversation_ref", {}).get("channel_id"))
+            print(f"  Slack delivery: {'enabled' if has_ref else 'DISABLED (no conversation ref)'}")
 
         if i < len(chunks) - 1:
             print(f"\n  Waiting {args.delay}s...")
             await asyncio.sleep(args.delay)
 
     print(f"\n{'='*60}")
-    print("Done! If Teams delivery is enabled, suggestions were also sent to your Teams chat.")
+    print("Done! If Slack delivery is enabled, suggestions were also sent to your Slack channel.")
 
 
 if __name__ == "__main__":

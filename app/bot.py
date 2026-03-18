@@ -4,12 +4,10 @@ import logging
 import re
 from pathlib import Path
 
-from botbuilder.core import ActivityHandler, TurnContext
-from botbuilder.schema import Activity, ActivityTypes
-
 from app.agent.core import AgentCore
 from app.config import permissions_config
 from app.security.permissions import auth_service, permission_manager
+from app.services.graph import GraphClient
 from app.services.meeting_transcript import MeetingTranscriptService
 from app.services.web_search import WebSearchService
 from app.storage.database import Database
@@ -17,90 +15,182 @@ from app.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
-class MyAiBot(ActivityHandler):
-    """Microsoft Teams bot that routes messages to the MyAi agent."""
+class SlackBot:
+    """Slack bot that routes messages to the MyAi agent."""
 
     def __init__(
         self,
         agent: AgentCore,
         search_service: WebSearchService,
-        graph_client=None,
         meeting_service: MeetingTranscriptService | None = None,
         database: Database | None = None,
+        graph_client: GraphClient | None = None,
     ):
         self.agent = agent
         self.search_service = search_service
-        self.graph_client = graph_client
         self.meeting_service = meeting_service
         self.database = database
-        # Stores context for pending /join calls so the calling webhook
-        # can associate the call_id with user info and conversation ref
-        self._pending_join_context: dict[str, dict] = {}
+        self.graph_client = graph_client
 
-    async def on_message_activity(self, turn_context: TurnContext):
-        user_id = turn_context.activity.from_property.id
-        user_name = turn_context.activity.from_property.name or "User"
-        # Strip the @mention so we can parse slash commands
-        text = TurnContext.remove_recipient_mention(turn_context.activity)
-        text = (text or turn_context.activity.text or "").strip()
+    async def handle_message(self, body: dict, say, client=None) -> None:
+        """Handle a direct message or channel message."""
+        event = body.get("event", {})
+        user_id = event.get("user", "")
+        text = (event.get("text") or "").strip()
+        channel = event.get("channel", "")
+
+        # Ignore bot messages
+        if event.get("bot_id") or event.get("subtype") == "bot_message":
+            return
 
         if not text:
             return
 
         # Auth check
         if not auth_service.is_user_allowed(user_id):
-            await turn_context.send_activity("⛔ You are not authorized to use MyAi.")
+            await say("You are not authorized to use MyAi.", channel=channel)
             return
 
-        # Check for slash commands
-        if text.startswith("/"):
-            response = await self._handle_command(text, user_id, user_name, turn_context)
-            if response is not None:
-                if response:  # Don't send empty strings
-                    await turn_context.send_activity(response)
-                return
+        # Resolve display name
+        user_name = await self._get_user_name(client, user_id)
 
-        # Send typing indicator
-        await turn_context.send_activities([
-            Activity(type=ActivityTypes.typing)
-        ])
+        # Check for slash-style commands (text starting with /)
+        if text.startswith("/"):
+            response = await self._handle_command(text, user_id, user_name, channel, say, client)
+            if response is not None:
+                if response:
+                    await say(response, channel=channel)
+                return
 
         # Process through agent
         try:
-            response = await self.agent.process_message(user_id, text)
+            result = await self.agent.process_message(user_id, text)
+            response = result["text"]
         except Exception as e:
             logger.error(f"Agent error: {e}", exc_info=True)
-            response = f"⚠️ Something went wrong: {str(e)[:200]}"
+            response = f"Something went wrong: {str(e)[:200]}"
 
-        # Teams has a 4096 char limit per message — split if needed
-        if len(response) > 4000:
-            chunks = [response[i:i+4000] for i in range(0, len(response), 4000)]
+        # Slack has a ~4000 char soft limit per message
+        if len(response) > 3900:
+            chunks = [response[i:i + 3900] for i in range(0, len(response), 3900)]
             for chunk in chunks:
-                await turn_context.send_activity(chunk)
+                await say(chunk, channel=channel)
         else:
-            await turn_context.send_activity(response)
+            await say(response, channel=channel)
 
-    async def _handle_command(self, text: str, user_id: str, user_name: str, turn_context: TurnContext) -> str | None:
+    async def handle_app_mention(self, body: dict, say, client=None) -> None:
+        """Handle @MyAi mentions in channels."""
+        event = body.get("event", {})
+        user_id = event.get("user", "")
+        text = (event.get("text") or "").strip()
+        channel = event.get("channel", "")
+
+        # Strip the bot mention from the text
+        text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+
+        if not text:
+            await say("Hey! I'm MyAi. Send me a message or type `/help` to see what I can do.", channel=channel)
+            return
+
+        if not auth_service.is_user_allowed(user_id):
+            await say("You are not authorized to use MyAi.", channel=channel)
+            return
+
+        user_name = await self._get_user_name(client, user_id)
+
+        # Check for commands
+        if text.startswith("/"):
+            response = await self._handle_command(text, user_id, user_name, channel, say, client)
+            if response is not None:
+                if response:
+                    await say(response, channel=channel)
+                return
+
+        try:
+            result = await self.agent.process_message(user_id, text)
+            response = result["text"]
+        except Exception as e:
+            logger.error(f"Agent error: {e}", exc_info=True)
+            response = f"Something went wrong: {str(e)[:200]}"
+
+        if len(response) > 3900:
+            chunks = [response[i:i + 3900] for i in range(0, len(response), 3900)]
+            for chunk in chunks:
+                await say(chunk, channel=channel)
+        else:
+            await say(response, channel=channel)
+
+    async def handle_slash_command(self, ack, body: dict, say, client=None) -> None:
+        """Handle Slack slash commands (e.g. /myai help)."""
+        await ack()
+        user_id = body.get("user_id", "")
+        text = (body.get("text") or "").strip()
+        channel = body.get("channel_id", "")
+
+        if not auth_service.is_user_allowed(user_id):
+            await say("You are not authorized to use MyAi.", channel=channel)
+            return
+
+        user_name = await self._get_user_name(client, user_id)
+
+        # Prefix with / so command handler recognizes it
+        cmd_text = f"/{text}" if text and not text.startswith("/") else text or "/help"
+        response = await self._handle_command(cmd_text, user_id, user_name, channel, say, client)
+        if response is not None:
+            if response:
+                await say(response, channel=channel)
+        else:
+            # Not a command, treat as agent message
+            try:
+                result = await self.agent.process_message(user_id, text)
+                response = result["text"]
+            except Exception as e:
+                logger.error(f"Agent error: {e}", exc_info=True)
+                response = f"Something went wrong: {str(e)[:200]}"
+            await say(response, channel=channel)
+
+    # ── Command handling ──
+
+    async def _handle_command(
+        self, text: str, user_id: str, user_name: str, channel: str, say, client=None
+    ) -> str | None:
         parts = text.split(maxsplit=1)
         command = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if command == "/help":
             return (
-                "**MyAi Commands**\n\n"
+                "*MyAi Commands*\n\n"
+                "*General:*\n"
                 "- `/model <name>` -- Switch Ollama model\n"
                 "- `/status` -- Show current config and health\n"
+                "- `/skills` -- Show available enterprise AI agents\n"
+                "- `/clear` -- Clear conversation history\n"
+                "- `/help` -- Show this message\n\n"
+                "*Profile & Context:*\n"
                 "- `/profile <info>` -- Set your profile (name, role, bio)\n"
                 "- `/context add <name> <content>` -- Add project/topic knowledge\n"
                 "- `/context list` -- Show stored contexts\n"
-                "- `/context remove <name>` -- Remove a context\n"
+                "- `/context remove <name>` -- Remove a context\n\n"
+                "*Files & Search:*\n"
                 "- `/allow <path>` -- Grant file access to a directory\n"
                 "- `/revoke` -- Revoke all file permissions\n"
                 "- `/search on|off` -- Toggle web search\n"
-                "- `/index <path>` -- Index a directory for RAG\n"
-                "- `/join [url]` -- Join a meeting (auto-detected when added to meeting)\n"
-                "- `/clear` -- Clear conversation history\n"
-                "- `/help` -- Show this message"
+                "- `/index <path>` -- Index a directory for RAG\n\n"
+                "*Meeting Transcript:*\n"
+                "- `/transcript start [subject]` -- Start a transcript session\n"
+                "- `/transcript paste <text>` -- Feed transcript text\n"
+                "- `/transcript end` -- End the transcript session\n\n"
+                "*Microsoft 365:*\n"
+                "- `/connect` -- Sign in to Microsoft 365\n"
+                "- `/disconnect` -- Sign out of Microsoft 365\n"
+                "- `/calendar [days]` -- View upcoming calendar events\n"
+                "- `/email [count]` -- View recent emails\n"
+                "- `/files [search]` -- Browse or search OneDrive files\n\n"
+                "*Enterprise Skills (auto-routed):*\n"
+                "Just ask naturally — MyAi routes to the right specialist:\n"
+                "_\"Reset my password\" → VULCAN (IT) | \"How many PTO days?\" → VESTA (HR)_\n"
+                "_\"Submit expense report\" → MIDAS (Finance) | \"Review this NDA\" → MINERVA (Legal)_"
             )
 
         elif command == "/status":
@@ -113,51 +203,67 @@ class MyAiBot(ActivityHandler):
                 except Exception:
                     pass
 
-            search_status = "🟢 On" if permission_manager.is_search_enabled(user_id) else "🔴 Off"
+            search_status = "On" if permission_manager.is_search_enabled(user_id) else "Off"
             dirs = permissions_config.allowed_dirs or ["None"]
 
+            sessions_info = ""
+            if self.meeting_service:
+                active = self.meeting_service.active_sessions
+                if active:
+                    sessions_info = f"\n*Active transcript sessions:* {len(active)}"
+
+            graph_status = "Not configured"
+            if self.graph_client and self.graph_client.is_configured:
+                if self.graph_client.is_user_connected(user_id):
+                    email = self.graph_client.get_user_email(user_id)
+                    graph_status = f"Connected ({email})" if email else "Connected"
+                else:
+                    graph_status = "Configured (not signed in)"
+
             return (
-                f"🐾 **MyAi Status**\n\n"
-                f"**Ollama:** {'🟢 Connected' if ollama_ok else '🔴 Not reachable'}\n"
-                f"**Model:** `{self.agent.ollama.model}`\n"
-                f"**Available models:** {', '.join(models) or 'N/A'}\n"
-                f"**Web search:** {search_status}\n"
-                f"**Allowed dirs:** {chr(10).join(dirs)}\n"
-                f"**User:** {user_name} (`{user_id[:16]}...`)"
+                f"*MyAi Status*\n\n"
+                f"*Ollama:* {'Connected' if ollama_ok else 'Not reachable'}\n"
+                f"*Model:* `{self.agent.ollama.model}`\n"
+                f"*Available models:* {', '.join(models) or 'N/A'}\n"
+                f"*Web search:* {search_status}\n"
+                f"*Microsoft 365:* {graph_status}\n"
+                f"*Allowed dirs:* {chr(10).join(dirs)}\n"
+                f"*User:* {user_name} (`{user_id}`)"
+                f"{sessions_info}"
             )
 
         elif command == "/model":
             if not arg:
                 return "Usage: `/model <model_name>` (e.g., `/model mistral:7b`)"
             self.agent.ollama.set_model(arg)
-            return f"✅ Switched to model: `{arg}`"
+            return f"Switched to model: `{arg}`"
 
         elif command == "/allow":
             if not arg:
                 return "Usage: `/allow <directory_path>` (e.g., `/allow /home/user/projects`)"
             resolved = str(Path(arg).resolve())
             if not Path(resolved).exists():
-                return f"⚠️ Directory not found: `{arg}`"
+                return f"Directory not found: `{arg}`"
             if not Path(resolved).is_dir():
-                return f"⚠️ Not a directory: `{arg}`"
+                return f"Not a directory: `{arg}`"
             permissions_config.grant_directory(resolved)
             permission_manager.grant(user_id, f"dir:{resolved}")
-            return f"✅ Granted access to: `{resolved}`"
+            return f"Granted access to: `{resolved}`"
 
         elif command == "/revoke":
             permissions_config.revoke_all()
             permission_manager.revoke_all(user_id)
-            return "✅ All file permissions revoked."
+            return "All file permissions revoked."
 
         elif command == "/search":
             if arg.lower() in ("on", "true", "enable", "1"):
                 self.search_service.toggle(True)
                 permission_manager.set_search_enabled(user_id, True)
-                return "🔍 Web search **enabled**. The agent can now search the web when needed."
+                return "Web search *enabled*. The agent can now search the web when needed."
             elif arg.lower() in ("off", "false", "disable", "0"):
                 self.search_service.toggle(False)
                 permission_manager.set_search_enabled(user_id, False)
-                return "🔍 Web search **disabled**."
+                return "Web search *disabled*."
             else:
                 return "Usage: `/search on` or `/search off`"
 
@@ -166,43 +272,39 @@ class MyAiBot(ActivityHandler):
                 return "Usage: `/index <directory_path>`"
             resolved = str(Path(arg).resolve())
             if not permissions_config.is_path_allowed(resolved):
-                return f"⚠️ Directory not in allowlist. Run `/allow {arg}` first."
+                return f"Directory not in allowlist. Run `/allow {arg}` first."
             try:
                 result = await self.agent.tools.rag_service.index_directory(resolved)
-                return f"⏳ Indexing complete!\n\n✅ {result}"
+                return f"Indexing complete! {result}"
             except Exception as e:
-                return f"❌ Indexing failed: {e}"
+                return f"Indexing failed: {e}"
 
         elif command == "/clear":
             await self.agent.db.clear_conversation(user_id)
-            return "✅ Conversation history cleared."
-            
+            return "Conversation history cleared."
+
         elif command == "/profile":
             if not self.database:
                 return "Database not configured."
             if not arg:
-                # Show current profile
                 profile = await self.database.get_user_profile(user_id)
                 if profile and any(profile.get(k) for k in ("name", "role", "bio")):
                     return (
-                        f"**Your Profile**\n\n"
-                        f"**Name:** {profile.get('name') or '(not set)'}\n"
-                        f"**Role:** {profile.get('role') or '(not set)'}\n"
-                        f"**Bio:** {profile.get('bio') or '(not set)'}\n\n"
+                        f"*Your Profile*\n\n"
+                        f"*Name:* {profile.get('name') or '(not set)'}\n"
+                        f"*Role:* {profile.get('role') or '(not set)'}\n"
+                        f"*Bio:* {profile.get('bio') or '(not set)'}\n\n"
                         "Update with: `/profile name:<your name> role:<your role> bio:<about you>`"
                     )
                 return (
                     "No profile set yet. Set one with:\n\n"
-                    "`/profile name:Anubhav role:Software Engineer bio:I work on frontend and API integrations at Acme Corp`"
+                    "`/profile name:Anubhav role:Software Engineer bio:I work on frontend and API integrations`"
                 )
 
-            # Parse key:value pairs from the argument
             name = role = bio = ""
-            # Support "name:X role:Y bio:Z" format
-            import re as _re
-            name_m = _re.search(r'name:\s*([^|]+?)(?=\s+(?:role|bio):|$)', arg)
-            role_m = _re.search(r'role:\s*([^|]+?)(?=\s+(?:name|bio):|$)', arg)
-            bio_m = _re.search(r'bio:\s*(.+)', arg)
+            name_m = re.search(r'name:\s*([^|]+?)(?=\s+(?:role|bio):|$)', arg)
+            role_m = re.search(r'role:\s*([^|]+?)(?=\s+(?:name|bio):|$)', arg)
+            bio_m = re.search(r'bio:\s*(.+)', arg)
             if name_m:
                 name = name_m.group(1).strip()
             if role_m:
@@ -210,7 +312,6 @@ class MyAiBot(ActivityHandler):
             if bio_m:
                 bio = bio_m.group(1).strip()
 
-            # If no key:value format detected, treat entire arg as bio
             if not name and not role and not bio:
                 bio = arg.strip()
 
@@ -218,9 +319,9 @@ class MyAiBot(ActivityHandler):
             profile = await self.database.get_user_profile(user_id)
             return (
                 f"Profile updated!\n\n"
-                f"**Name:** {profile.get('name', '')}\n"
-                f"**Role:** {profile.get('role', '')}\n"
-                f"**Bio:** {profile.get('bio', '')}\n\n"
+                f"*Name:* {profile.get('name', '')}\n"
+                f"*Role:* {profile.get('role', '')}\n"
+                f"*Bio:* {profile.get('bio', '')}\n\n"
                 "This info will be used when suggesting responses in meetings."
             )
 
@@ -243,199 +344,266 @@ class MyAiBot(ActivityHandler):
                 contexts = await self.database.get_all_contexts(user_id)
                 if not contexts:
                     return "No contexts stored. Add one with `/context add <name> <content>`"
-                lines = ["**Stored Contexts:**\n"]
+                lines = ["*Stored Contexts:*\n"]
                 for ctx in contexts:
                     preview = ctx["content"][:100].replace("\n", " ")
-                    lines.append(f"- **{ctx['name']}**: {preview}...")
+                    lines.append(f"- *{ctx['name']}*: {preview}...")
                 return "\n".join(lines)
 
             elif sub_cmd == "add":
                 name_and_content = sub_arg.split(maxsplit=1)
                 if len(name_and_content) < 2:
-                    return "Usage: `/context add <name> <content>`\nExample: `/context add myproject We are building a Teams bot...`"
-                name = name_and_content[0]
+                    return "Usage: `/context add <name> <content>`\nExample: `/context add myproject We are building a Slack bot...`"
+                ctx_name = name_and_content[0]
                 content = name_and_content[1]
-                await self.database.add_context(user_id, name, content)
-                return f"Context **{name}** saved ({len(content)} chars). This will be used in meeting suggestions."
+                await self.database.add_context(user_id, ctx_name, content)
+                return f"Context *{ctx_name}* saved ({len(content)} chars). This will be used in meeting suggestions."
 
             elif sub_cmd == "remove":
                 if not sub_arg:
                     return "Usage: `/context remove <name>`"
                 removed = await self.database.remove_context(user_id, sub_arg)
                 if removed:
-                    return f"Context **{sub_arg}** removed."
-                return f"No context named **{sub_arg}** found."
+                    return f"Context *{sub_arg}* removed."
+                return f"No context named *{sub_arg}* found."
 
             return "Unknown subcommand. Use `add`, `list`, or `remove`."
 
-        elif command == "/join":
-            if not self.graph_client:
-                return "Graph Client not configured."
+        elif command == "/skills":
+            if hasattr(self.agent, 'skill_registry') and self.agent.skill_registry:
+                return self.agent.skill_registry.get_skills_summary()
+            return "No enterprise skills configured."
 
-            # Try to find the join URL from: explicit arg > HTML-embedded > channel_data
-            join_url = arg.strip()
+        elif command == "/transcript":
+            return await self._handle_transcript_command(arg, user_id, user_name, channel, say, client)
 
-            # Teams might wrap the URL in HTML tags
-            if join_url:
-                url_match = re.search(
-                    r'(https://teams\.microsoft\.com/(?:l/meetup-join|meet)/[^\s>|]+)', join_url
-                )
-                if url_match:
-                    join_url = url_match.group(1)
-                else:
-                    m = re.search(r'href=["\']([^"\']+)["\']', join_url)
-                    if m:
-                        join_url = m.group(1)
-                    elif "<" in join_url and ">" in join_url:
-                        join_url = re.sub(r'<[^>]+>', '', join_url).strip()
+        elif command == "/connect":
+            return await self._handle_connect(user_id)
 
-            # Fall back to meeting context from channel_data
-            if not join_url or "http" not in join_url:
-                join_url = self._extract_meeting_join_url(turn_context)
+        elif command == "/disconnect":
+            return self._handle_disconnect(user_id)
 
-            if not join_url:
+        elif command == "/calendar":
+            return await self._handle_calendar(arg, user_id)
+
+        elif command == "/email":
+            return await self._handle_email(arg, user_id)
+
+        elif command == "/files":
+            return await self._handle_files(arg, user_id)
+
+        return None  # Not a recognized command -- pass to agent
+
+    # ── Transcript session management ──
+
+    async def _handle_transcript_command(
+        self, arg: str, user_id: str, user_name: str, channel: str, say, client=None
+    ) -> str:
+        if not self.meeting_service:
+            return "Meeting service not configured."
+
+        sub_parts = arg.split(maxsplit=1) if arg else [""]
+        sub_cmd = sub_parts[0].lower()
+        sub_arg = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+
+        if sub_cmd == "start":
+            # Check if user already has a session
+            existing = self.meeting_service.get_session_by_user(user_id)
+            if existing:
                 return (
-                    "I couldn't find the meeting link. Either:\n"
-                    "1. Add me directly to the meeting (I'll join automatically), or\n"
-                    "2. Run: `/join <meeting-url>`"
+                    f"You already have an active transcript session (id: `{existing.call_id[:12]}...`).\n"
+                    "End it first with `/transcript end`."
                 )
 
-            await self._auto_join_meeting(turn_context, join_url, user_id, user_name)
-            return ""  # _auto_join_meeting sends its own messages; return empty to prevent fallthrough
+            import uuid
+            session_id = str(uuid.uuid4())
+            meeting_subject = sub_arg or "Meeting"
 
-        return None  # Not a recognized command — pass to agent
+            self.meeting_service.start_session(
+                call_id=session_id,
+                user_id=user_id,
+                user_name=user_name,
+                meeting_subject=meeting_subject,
+                conversation_reference={
+                    "channel_id": channel,
+                },
+            )
+            return (
+                f"Transcript session started: *{meeting_subject}*\n\n"
+                "Now paste transcript text with `/transcript paste <text>`\n"
+                "I'll analyze it and send you suggested responses.\n\n"
+                "When done, run `/transcript end` to save a summary."
+            )
 
-    # ── Auto-join meeting support ──
+        elif sub_cmd == "paste":
+            if not sub_arg:
+                return "Usage: `/transcript paste <transcript text>`"
 
-    def _extract_meeting_join_url(self, turn_context: TurnContext) -> str | None:
-        """Extract a meeting join URL from the activity's channel_data."""
-        chan_data = turn_context.activity.channel_data or {}
-        # Teams nests meeting info in different places depending on event type
-        meeting = chan_data.get("meeting", {})
-        join_url = (
-            meeting.get("joinUrl")
-            or meeting.get("joinWebUrl")
-            or chan_data.get("joinUrl")
-            or chan_data.get("joinWebUrl")
+            session = self.meeting_service.get_session_by_user(user_id)
+            if not session:
+                return "No active transcript session. Start one with `/transcript start [subject]`"
+
+            await self.meeting_service.ingest_transcript(session.call_id, sub_arg)
+            line_count = len(session.transcript_lines)
+            return f"Ingested transcript text ({line_count} total lines). Analyzing..."
+
+        elif sub_cmd == "end":
+            session = self.meeting_service.get_session_by_user(user_id)
+            if not session:
+                return "No active transcript session."
+
+            line_count = len(session.transcript_lines)
+            self.meeting_service.end_session(session.call_id)
+            return (
+                f"Transcript session ended. ({line_count} lines captured)\n"
+                "A meeting summary will be saved automatically."
+            )
+
+        elif sub_cmd == "status":
+            session = self.meeting_service.get_session_by_user(user_id)
+            if not session:
+                return "No active transcript session."
+            return (
+                f"*Active Session*\n"
+                f"*Subject:* {session.meeting_subject}\n"
+                f"*Lines:* {len(session.transcript_lines)}\n"
+                f"*Last suggestion:* {(session.last_suggestion[:150] + '...') if session.last_suggestion else '(none yet)'}"
+            )
+
+        else:
+            return (
+                "Usage:\n"
+                "- `/transcript start [subject]` -- Start a transcript session\n"
+                "- `/transcript paste <text>` -- Feed transcript text\n"
+                "- `/transcript status` -- Check session status\n"
+                "- `/transcript end` -- End session and save summary"
+            )
+
+    # ── Microsoft Graph commands ──
+
+    async def _handle_connect(self, user_id: str) -> str:
+        if not self.graph_client or not self.graph_client.is_configured:
+            return "Microsoft 365 integration is not configured. Set `GRAPH_CLIENT_ID` and `GRAPH_CLIENT_SECRET` in `.env`."
+        if self.graph_client.is_user_connected(user_id):
+            email = self.graph_client.get_user_email(user_id)
+            return f"You're already connected as *{email}*. Use `/disconnect` to sign out first."
+        auth_url = self.graph_client.get_auth_url(state=user_id)
+        return (
+            "*Connect to Microsoft 365*\n\n"
+            f"<{auth_url}|Click here to sign in with your Microsoft account>\n\n"
+            "After signing in, you'll be redirected back and your calendar, email, "
+            "and files will be accessible through MyAi."
         )
-        return join_url if join_url and "http" in join_url else None
 
-    async def _auto_join_meeting(
-        self, turn_context: TurnContext, join_url: str, user_id: str, user_name: str
-    ) -> None:
-        """Join a meeting automatically and set up the transcript listener."""
+    def _handle_disconnect(self, user_id: str) -> str:
         if not self.graph_client:
-            logger.warning("Cannot auto-join meeting: Graph client not configured")
-            return
+            return "Microsoft 365 integration is not configured."
+        if not self.graph_client.is_user_connected(user_id):
+            return "You're not connected to Microsoft 365."
+        self.graph_client.disconnect_user(user_id)
+        return "Disconnected from Microsoft 365. Your tokens have been cleared."
 
-        from app.config import settings as app_settings
-        callback_host = app_settings.callback_host if app_settings.callback_host else None
-        if not callback_host:
-            callback_host = turn_context.activity.service_url or "http://localhost:8000"
-        callback_url = f"{callback_host.rstrip('/')}/api/calling"
-
-        thread_id = turn_context.activity.conversation.id
-        if ";" in thread_id:
-            thread_id = thread_id.split(";")[0]
+    async def _handle_calendar(self, arg: str, user_id: str) -> str:
+        if not self.graph_client or not self.graph_client.is_configured:
+            return "Microsoft 365 integration is not configured."
+        if not self.graph_client.is_user_connected(user_id):
+            return "Not connected to Microsoft 365. Use `/connect` first."
 
         try:
-            logger.info(f"Auto-joining meeting: {join_url}")
-            result = await self.graph_client.join_meeting_by_url(callback_url, join_url, thread_id)
-            call_id = result.get("id", "")
+            days = 7
+            top = 10
+            if arg:
+                try:
+                    days = int(arg)
+                except ValueError:
+                    pass
+            events = await self.graph_client.get_calendar_events(user_id, top=top, days_ahead=days)
+            if not events:
+                return f"No upcoming events in the next {days} days."
 
-            # Extract meeting subject if available
-            chan_data = turn_context.activity.channel_data or {}
-            meeting_subject = chan_data.get("meeting", {}).get("title", "")
-
-            conv_ref = {
-                "service_url": turn_context.activity.service_url,
-                "conversation_id": turn_context.activity.conversation.id,
-            }
-            logger.info(f"Join returned call_id: {call_id}")
-            self._pending_join_context[call_id] = {
-                "user_id": user_id,
-                "user_name": user_name,
-                "meeting_subject": meeting_subject,
-                "conversation_reference": conv_ref,
-            }
-            # Also store under a generic key so the calling webhook can find it
-            # even if Graph uses a different call_id in notifications
-            self._pending_join_context["_latest"] = self._pending_join_context[call_id]
-
-            await turn_context.send_activity(
-                "I've joined the meeting automatically. "
-                "I'll send you suggested responses as the conversation unfolds."
-            )
+            lines = [f"*Upcoming Calendar ({days} days):*\n"]
+            for e in events:
+                start = e["start"][:16].replace("T", " ") if e["start"] else "?"
+                subject = e["subject"]
+                location = f" | {e['location']}" if e.get("location") else ""
+                online = " (Online)" if e.get("is_online") else ""
+                lines.append(f"- *{start}* — {subject}{location}{online}")
+            return "\n".join(lines)
         except Exception as e:
-            logger.error(f"Auto-join meeting failed: {e}", exc_info=True)
-            await turn_context.send_activity(
-                f"I detected a meeting but couldn't join automatically: {str(e)[:200]}\n\n"
-                "You can try manually with `/join <meeting-url>`."
-            )
+            logger.error(f"Calendar fetch failed: {e}", exc_info=True)
+            return f"Failed to fetch calendar: {str(e)[:200]}"
 
-    async def on_event_activity(self, turn_context: TurnContext):
-        """Handle Teams meeting lifecycle events (meetingStart, meetingEnd)."""
-        event_name = turn_context.activity.name or ""
-        chan_data = turn_context.activity.channel_data or {}
+    async def _handle_email(self, arg: str, user_id: str) -> str:
+        if not self.graph_client or not self.graph_client.is_configured:
+            return "Microsoft 365 integration is not configured."
+        if not self.graph_client.is_user_connected(user_id):
+            return "Not connected to Microsoft 365. Use `/connect` first."
 
-        logger.info(f"Event received: {event_name}, channel_data keys: {list(chan_data.keys())}")
+        try:
+            top = 10
+            if arg:
+                try:
+                    top = int(arg)
+                except ValueError:
+                    pass
+            emails = await self.graph_client.get_recent_emails(user_id, top=top)
+            if not emails:
+                return "No recent emails."
 
-        if "meetingStart" in event_name:
-            join_url = self._extract_meeting_join_url(turn_context)
-            if join_url:
-                user_id = (
-                    turn_context.activity.from_property.id
-                    if turn_context.activity.from_property
-                    else "unknown"
+            lines = ["*Recent Emails:*\n"]
+            for e in emails:
+                read_icon = "" if e["is_read"] else " *NEW*"
+                importance = " (!)" if e["importance"] == "high" else ""
+                received = e["received"][:16].replace("T", " ") if e["received"] else ""
+                lines.append(
+                    f"- {received} — *{e['subject']}*{read_icon}{importance}\n"
+                    f"  From: {e['from']} | {e['preview'][:80]}..."
                 )
-                user_name = (
-                    turn_context.activity.from_property.name
-                    if turn_context.activity.from_property
-                    else "User"
-                ) or "User"
-                await self._auto_join_meeting(turn_context, join_url, user_id, user_name)
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Email fetch failed: {e}", exc_info=True)
+            return f"Failed to fetch emails: {str(e)[:200]}"
+
+    async def _handle_files(self, arg: str, user_id: str) -> str:
+        if not self.graph_client or not self.graph_client.is_configured:
+            return "Microsoft 365 integration is not configured."
+        if not self.graph_client.is_user_connected(user_id):
+            return "Not connected to Microsoft 365. Use `/connect` first."
+
+        try:
+            if arg:
+                files = await self.graph_client.search_files(user_id, arg)
+                header = f"*Files matching \"{arg}\":*\n"
             else:
-                logger.info("meetingStart event but no joinUrl found in channel_data")
+                files = await self.graph_client.get_recent_files(user_id)
+                header = "*Recent Files:*\n"
 
-        elif "meetingEnd" in event_name:
-            # Clean up any sessions associated with this conversation
-            conv_id = turn_context.activity.conversation.id
-            if self.meeting_service:
-                for call_id, session in list(self.meeting_service.active_sessions.items()):
-                    if session.conversation_reference.get("conversation_id") == conv_id:
-                        self.meeting_service.end_session(call_id)
-                        logger.info(f"Meeting ended, session {call_id} cleaned up")
+            if not files:
+                return "No files found."
 
-    async def on_members_added_activity(self, members_added, turn_context: TurnContext):
-        bot_id = turn_context.activity.recipient.id
-        bot_was_added = any(m.id == bot_id for m in members_added)
+            lines = [header]
+            for f in files:
+                size_kb = f["size"] / 1024 if f["size"] else 0
+                modified = f["modified"][:16].replace("T", " ") if f.get("modified") else ""
+                lines.append(f"- *{f['name']}* ({size_kb:.0f} KB) — {modified}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error(f"Files fetch failed: {e}", exc_info=True)
+            return f"Failed to fetch files: {str(e)[:200]}"
 
-        # Check if this is a meeting chat (bot invited to a meeting)
-        if bot_was_added:
-            join_url = self._extract_meeting_join_url(turn_context)
-            if join_url:
-                # Bot was added to a meeting -- auto-join
-                chan_data = turn_context.activity.channel_data or {}
-                # The user who added the bot is typically the organizer
-                user_id = (
-                    turn_context.activity.from_property.id
-                    if turn_context.activity.from_property
-                    else "unknown"
-                )
-                user_name = (
-                    turn_context.activity.from_property.name
-                    if turn_context.activity.from_property
-                    else "User"
-                ) or "User"
-                await self._auto_join_meeting(turn_context, join_url, user_id, user_name)
-                return
+    # ── Helpers ──
 
-        # Regular welcome for non-meeting chats
-        for member in members_added:
-            if member.id != bot_id:
-                await turn_context.send_activity(
-                    "**Welcome to MyAi!**\n\n"
-                    "I'm your local AI assistant, powered by Ollama. "
-                    "I run entirely on your machine -- your data stays private.\n\n"
-                    "Type `/help` to see what I can do, or just start chatting!"
-                )
+    async def _get_user_name(self, client, user_id: str) -> str:
+        """Resolve Slack user ID to display name."""
+        if not client:
+            return "User"
+        try:
+            result = await client.users_info(user=user_id)
+            profile = result.get("user", {}).get("profile", {})
+            return (
+                profile.get("display_name")
+                or profile.get("real_name")
+                or result.get("user", {}).get("name", "User")
+            )
+        except Exception:
+            return "User"
