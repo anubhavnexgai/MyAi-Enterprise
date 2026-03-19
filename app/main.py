@@ -30,6 +30,7 @@ from app.services.doc_processor import DocumentProcessor
 from app.services.encryption import ConfigEncryption
 from app.services.indexing import IndexingService
 from app.services.nexgai_client import NexgAIClient
+from app.services.web_search import WebSearchService
 from app.learning.feedback_service import FeedbackService
 from app.learning.engine import LearningEngine
 from app.learning.routes import setup_learning_routes
@@ -60,6 +61,9 @@ indexing_service = IndexingService(database, rag_service, doc_processor, encrypt
 
 # -- Initialize NexgAI integration --
 nexgai_client = NexgAIClient()
+
+# -- Initialize web search --
+search_service = WebSearchService()
 
 # -- Initialize agent (NexgAI agents + Ollama LLM) --
 agent = AgentCore(
@@ -107,7 +111,7 @@ meeting_service = MeetingTranscriptService(
     database=database,
 )
 
-bot = SlackBot(agent, None, meeting_service, database, graph_client=graph_client)
+bot = SlackBot(agent, search_service, meeting_service, database, graph_client=graph_client)
 
 
 # -- Debug HTTP server (for simulate script and health checks) --
@@ -596,6 +600,7 @@ async def web_status(req: web.Request) -> web.Response:
         "model": ollama_client.model,
         "graph": graph_status,
         "nexgai": nexgai_status,
+        "search": search_service.enabled if search_service else False,
     })
 
 
