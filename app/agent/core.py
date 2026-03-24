@@ -5,38 +5,44 @@ import re
 import time
 from typing import TYPE_CHECKING, AsyncIterator
 
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import SYSTEM_PROMPT, build_tool_prompt, TOOL_DEFINITIONS, TOOL_RESULT_TEMPLATE
 from app.services.ollama import OllamaClient
 from app.storage.database import Database
 from app.storage.models import Message, Role
 
 if TYPE_CHECKING:
+    from app.agent.tools import ToolRegistry
     from app.auth.models import User
     from app.auth.rbac import RBACService
     from app.services.nexgai_client import NexgAIClient
 
 logger = logging.getLogger(__name__)
 
+MAX_TOOL_ROUNDS = 10
+
 
 class AgentCore:
-    """Agent with 2-way routing: NexgAI agents for specialized tasks, Ollama LLM for general questions."""
+    """Agent with 2-way routing: NexgAI agents for specialized tasks, Ollama LLM with tool-calling for general questions."""
 
     def __init__(
         self,
         ollama: OllamaClient,
         database: Database,
         nexgai_client: NexgAIClient | None = None,
+        tools: ToolRegistry | None = None,
     ):
         self.ollama = ollama
         self.db = database
         self.nexgai: NexgAIClient | None = nexgai_client
+        self.tools: ToolRegistry | None = tools
         self.rbac_service: RBACService | None = None
         self._prompt_override: str | None = None  # Set by learning loop when admin approves a refinement
 
     def _build_system_prompt(self) -> str:
-        if self._prompt_override:
-            return self._prompt_override
-        return SYSTEM_PROMPT
+        base = self._prompt_override if self._prompt_override else SYSTEM_PROMPT
+        if self.tools:
+            base += "\n" + build_tool_prompt()
+        return base
 
     async def process_message(
         self,
@@ -44,10 +50,19 @@ class AgentCore:
         user_text: str,
         user_name: str = "User",
         user: User | None = None,
+        conversation_id: str | None = None,
     ) -> dict:
         """Process a message and return a dict with 'text', 'message_id', 'conversation_id', 'source', 'agent_name'."""
+        # Set user context for tools that need it (reminders, etc.)
+        if self.tools:
+            self.tools._reminder_user_id = user_id
         t0 = time.monotonic()
-        conv = await self.db.get_or_create_conversation(user_id)
+        if conversation_id:
+            conv = await self.db.get_conversation_by_id(conversation_id)
+            if not conv:
+                conv = await self.db.get_or_create_conversation(user_id)
+        else:
+            conv = await self.db.get_or_create_conversation(user_id)
 
         user_msg = Message(role=Role.USER, content=user_text)
         await self.db.add_message(conv.id, user_msg)
@@ -71,7 +86,7 @@ class AgentCore:
                 if _m:
                     skill_name = _m.group(1)
             else:
-                # 2. Fall back to Ollama LLM for general questions
+                # 2. Fall back to Ollama LLM with tool-calling
                 event_type = "llm_conversation"
                 response = await self._chat(conv)
         except Exception as e:
@@ -142,6 +157,16 @@ class AgentCore:
             if not response_text.strip():
                 return None
 
+            # Skip generic stub responses — let Ollama handle properly
+            stub_phrases = [
+                "i'm here to help",
+                "how can i assist you",
+                "how may i help you",
+            ]
+            if any(phrase in response_text.lower() for phrase in stub_phrases):
+                logger.info("NexgAI returned stub response, falling through to Ollama")
+                return None
+
             # Format the response with the handler info
             handled_by = result.get("handled_by", "NexgAI")
             parts = [f"_Handled by *{handled_by}* (NexgAI)_\n"]
@@ -158,6 +183,7 @@ class AgentCore:
         user_text: str,
         user_name: str = "User",
         user: User | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncIterator[dict]:
         """Process a message with streaming support for NexgAI responses.
 
@@ -169,13 +195,18 @@ class AgentCore:
         """
         # If NexgAI unavailable, go straight to Ollama LLM
         if not self.nexgai or not self.nexgai.is_available:
-            result = await self.process_message(user_id, user_text, user_name, user=user)
+            result = await self.process_message(user_id, user_text, user_name, user=user, conversation_id=conversation_id)
             yield {"type": "response", **result}
             return
 
         # Stream through NexgAI
         t0 = time.monotonic()
-        conv = await self.db.get_or_create_conversation(user_id)
+        if conversation_id:
+            conv = await self.db.get_conversation_by_id(conversation_id)
+            if not conv:
+                conv = await self.db.get_or_create_conversation(user_id)
+        else:
+            conv = await self.db.get_or_create_conversation(user_id)
         user_msg = Message(role=Role.USER, content=user_text)
         await self.db.add_message(conv.id, user_msg)
 
@@ -262,16 +293,83 @@ class AgentCore:
                    "conversation_id": conv.id, "source": "local", "agent_name": None}
 
     async def _chat(self, conv) -> str:
-        """General-purpose LLM conversation via Ollama."""
+        """Hybrid agent: LLM classifies intent → code executes tools → LLM synthesizes response."""
         system = self._build_system_prompt()
 
         msgs = [{"role": "system", "content": system}]
         for msg in conv.messages[-20:]:
             msgs.append({"role": msg.role.value, "content": msg.content})
 
-        try:
-            result = await self.ollama.chat(messages=msgs)
-            return result.get("message", {}).get("content", "").strip()
-        except Exception as e:
-            logger.error(f"Ollama failed: {e}", exc_info=True)
-            return f"Couldn't reach Ollama. Make sure it's running and `{self.ollama.model}` is pulled."
+        if not self.tools:
+            try:
+                result = await self.ollama.chat(messages=msgs)
+                return result.get("message", {}).get("content", "").strip()
+            except Exception as e:
+                logger.error(f"Ollama failed: {e}", exc_info=True)
+                return f"Couldn't reach Ollama. Make sure it's running and `{self.ollama.model}` is pulled."
+
+        # Step 1: Ask LLM to classify — should it use a tool or answer directly?
+        content = ""
+        for round_num in range(MAX_TOOL_ROUNDS):
+            try:
+                result = await self.ollama.chat(messages=msgs)
+            except Exception as e:
+                logger.error(f"Ollama failed: {e}", exc_info=True)
+                return f"Couldn't reach Ollama. Make sure it's running."
+
+            message = result.get("message", {})
+            content = message.get("content", "").strip()
+            logger.info(f"LLM response (round {round_num}): {content[:200]}")
+
+            # Check if LLM output a tool call block
+            from app.agent.tools import ToolRegistry as TR
+            parsed = TR.parse_tool_call(content)
+
+            if not parsed:
+                # No tool call — check if LLM is faking an action
+                # If the response looks like it's describing a tool action, force a classification
+                if round_num == 0 and self._looks_like_fake_action(content):
+                    logger.info("LLM faked a tool action, forcing re-classification")
+                    msgs.append({"role": "assistant", "content": content})
+                    msgs.append({"role": "user", "content": (
+                        "You described the action but did NOT execute it. "
+                        "You MUST output a ```tool block to actually perform it. "
+                        "Output ONLY the tool block now."
+                    )})
+                    continue
+                # Genuine answer — return it
+                return content
+
+            # Tool call found — execute it
+            tool_name = parsed.get("name", "")
+            arguments = parsed.get("arguments", {})
+            logger.info(f"Tool call: {tool_name}({arguments})")
+            tool_result = await self.tools.execute(tool_name, arguments)
+
+            # Step 2: Send tool result back to LLM for natural response
+            msgs.append({"role": "assistant", "content": content})
+            msgs.append({
+                "role": "user",
+                "content": TOOL_RESULT_TEMPLATE.format(
+                    tool_name=tool_name, result=tool_result
+                ),
+            })
+            # Continue loop — LLM will either answer or call another tool
+
+        return content or "Sorry, I couldn't complete that request. Please try rephrasing."
+
+    @staticmethod
+    def _looks_like_fake_action(text: str) -> bool:
+        """Detect if the LLM described an action instead of executing it."""
+        lower = text.lower()
+        fake_phrases = [
+            "email drafted", "email sent", "i have sent",
+            "i have drafted", "reminder set", "reminder:", "*reminder:*",
+            "whatsapp message sent", "i have set a reminder",
+            "the email has been", "your reminder has been",
+            "message has been sent", "i've drafted", "i've sent",
+        ]
+        # Only flag as fake if there's NO tool block in the text
+        if "```tool" in lower or '{"name"' in lower:
+            return False
+        return any(phrase in lower for phrase in fake_phrases)

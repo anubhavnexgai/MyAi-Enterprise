@@ -142,7 +142,7 @@ async def main():
     await database.init()
 
     tool_registry = ToolRegistry(file_service, search_service, rag_service)
-    agent = AgentCore(ollama_client, tool_registry, database)
+    agent = AgentCore(ollama_client, database, tools=tool_registry)
 
     # Health check
     ollama_ok = await ollama_client.health_check()

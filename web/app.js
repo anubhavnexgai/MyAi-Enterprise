@@ -17,6 +17,8 @@
     let settings = loadSettings();
     let currentUser = null;
     let authToken = localStorage.getItem("myai_auth_token") || null;
+    let activeConversationId = null;
+    let conversationsList = [];
 
     // -- DOM refs --
     const $messages = document.getElementById("messages");
@@ -24,10 +26,10 @@
     const $input = document.getElementById("chat-input");
     const $sendBtn = document.getElementById("btn-send");
     const $typing = document.getElementById("typing-indicator");
+    const $connDot = document.getElementById("conn-dot");
     const $connStatus = document.getElementById("connection-status");
     const $sidebar = document.getElementById("sidebar");
     const $toggleSidebar = document.getElementById("btn-toggle-sidebar");
-    const $clearBtn = document.getElementById("btn-clear");
     const $settingsModal = document.getElementById("settings-modal");
     const $closeSettings = document.getElementById("btn-close-settings");
     const $saveSettings = document.getElementById("btn-save-settings");
@@ -43,6 +45,11 @@
     const $searchToggle = document.getElementById("search-toggle");
     const $skillsList = document.getElementById("skills-list");
 
+    // Header pill refs
+    const $modelPillName = document.getElementById("model-pill-name");
+    const $ms365Pill = document.getElementById("ms365-pill");
+    const $ms365StatusText = document.getElementById("ms365-status-text");
+
     // Auth refs
     const $authScreen = document.getElementById("auth-screen");
     const $setupForm = document.getElementById("setup-form");
@@ -53,10 +60,21 @@
     const $userDisplayName = document.getElementById("user-display-name");
     const $userRoleBadge = document.getElementById("user-role-badge");
 
+    // New sidebar button refs
+    const $btnNewChat = document.getElementById("btn-new-chat");
+    const $btnSettings = document.getElementById("btn-settings");
+    const $btnStatusToggle = document.getElementById("btn-status-toggle");
+    const $statusPanel = document.getElementById("status-panel");
+    const $recentChats = document.getElementById("recent-chats");
+
     // -- Init --
     function init() {
         bindAuthEvents();
         checkSetup();
+        // Request notification permission early
+        if ("Notification" in window && Notification.permission === "default") {
+            Notification.requestPermission();
+        }
     }
 
     function loadSettings() {
@@ -170,6 +188,7 @@
             authToken = data.token;
             currentUser = data.user;
             localStorage.setItem("myai_auth_token", authToken);
+            if (data.user) localStorage.setItem("myai_user", JSON.stringify(data.user));
             showChat();
         } catch (err) {
             showAuthError($error, "Connection failed. Is MyAi running?");
@@ -205,6 +224,7 @@
             authToken = data.token;
             currentUser = data.user;
             localStorage.setItem("myai_auth_token", authToken);
+            if (data.user) localStorage.setItem("myai_user", JSON.stringify(data.user));
             showChat();
         } catch (err) {
             showAuthError($error, "Connection failed. Is MyAi running?");
@@ -225,6 +245,8 @@
 
         authToken = null;
         currentUser = null;
+        activeConversationId = null;
+        conversationsList = [];
         localStorage.removeItem("myai_auth_token");
 
         // Disconnect WebSocket
@@ -262,6 +284,14 @@
             $userDisplayName.textContent = currentUser.display_name || "User";
             $userRoleBadge.textContent = formatRoleName(currentUser.role_level);
             $userRoleBadge.className = "user-role-badge role-" + currentUser.role_level;
+
+            // Show admin links for admin+ roles
+            var linkDashboard = document.getElementById("link-admin-dashboard");
+            var linkLearning = document.getElementById("link-admin-learning");
+            if (currentUser.role_level === "super_admin" || currentUser.role_level === "admin") {
+                if (linkDashboard) linkDashboard.classList.remove("hidden");
+                if (linkLearning) linkLearning.classList.remove("hidden");
+            }
         }
 
         // Populate settings fields
@@ -269,11 +299,98 @@
         $settingUserName.value = settings.userName;
         $settingWsUrl.value = settings.wsUrl || DEFAULT_WS_URL;
 
-        showWelcome();
         connect();
         bindChatEvents();
+        loadConversationsList();
+        loadChatHistory();
         fetchStatus();
         fetchSkills();
+
+        // Admin links — pass token via query param
+        var linkDashboard = document.getElementById("link-admin-dashboard");
+        var linkLearning = document.getElementById("link-admin-learning");
+        if (linkDashboard) {
+            linkDashboard.addEventListener("click", function(e) {
+                e.preventDefault();
+                window.location.href = "/admin?token=" + encodeURIComponent(authToken || "");
+            });
+        }
+        if (linkLearning) {
+            linkLearning.addEventListener("click", function(e) {
+                e.preventDefault();
+                window.location.href = "/admin/learning?token=" + encodeURIComponent(authToken || "");
+            });
+        }
+    }
+
+    function loadChatHistory(conversationId) {
+        if (!authToken) {
+            showWelcome();
+            return;
+        }
+
+        var url;
+        if (conversationId) {
+            url = "/api/conversations/" + encodeURIComponent(conversationId) + "/history?limit=50";
+        } else {
+            url = "/api/chat/history?limit=50";
+        }
+
+        fetch(url, {
+            headers: { "Authorization": "Bearer " + authToken },
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error("Failed to load history");
+                return r.json();
+            })
+            .then(function (data) {
+                var messages = data.messages || [];
+                if (messages.length === 0) {
+                    showWelcome();
+                    return;
+                }
+
+                // Remove welcome if present, since we have history
+                removeWelcome();
+
+                for (var i = 0; i < messages.length; i++) {
+                    var msg = messages[i];
+                    addHistoryMessage(msg.role, msg.content, msg.id, msg.conversation_id, msg.timestamp);
+                }
+                scrollToBottom();
+            })
+            .catch(function () {
+                // If history load fails, just show welcome
+                showWelcome();
+            });
+    }
+
+    function addHistoryMessage(role, text, messageId, conversationId, timestamp) {
+        var $msg = document.createElement("div");
+        $msg.className = "message " + role;
+
+        if (messageId) {
+            $msg.setAttribute("data-message-id", messageId);
+            $msg.setAttribute("data-conversation-id", conversationId || "");
+        }
+
+        var html = "";
+        html += formatMessage(text);
+
+        // Format the stored timestamp
+        var timeStr = "";
+        if (timestamp) {
+            try {
+                var d = new Date(timestamp);
+                timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            } catch (e) {
+                timeStr = "";
+            }
+        }
+        html += '<span class="msg-time">' + timeStr + '</span>';
+
+        $msg.innerHTML = html;
+        $messages.appendChild($msg);
     }
 
     function formatRoleName(role) {
@@ -373,11 +490,42 @@
         switch (data.type) {
             case "response":
                 hideTyping();
-                addMessage("assistant", data.text, data.agent, data.message_id, data.conversation_id, data.source);
+                var msgText = data.text;
+                addMessage("assistant", msgText, data.agent, data.message_id, data.conversation_id, data.source);
+                // Track active conversation from server response
+                if (data.conversation_id && !activeConversationId) {
+                    activeConversationId = data.conversation_id;
+                    // Tell server about the active conversation
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: "switch_conversation",
+                            conversation_id: activeConversationId,
+                        }));
+                    }
+                }
+                // Refresh sidebar to show updated preview
+                loadConversationsList();
+                // Add Microsoft connect button after the message
+                if (data.action === "connect_microsoft" && data.connect_url) {
+                    var btnDiv = document.createElement("div");
+                    btnDiv.style.cssText = "text-align:center;padding:12px 0;";
+                    var btn = document.createElement("a");
+                    btn.href = data.connect_url;
+                    btn.target = "_blank";
+                    btn.className = "connect-btn";
+                    btn.textContent = "Sign in with Microsoft";
+                    btnDiv.appendChild(btn);
+                    $messages.appendChild(btnDiv);
+                    scrollToBottom();
+                }
                 break;
             case "stream_end":
                 hideTyping();
                 addMessage("assistant", data.text, data.agent, data.message_id, data.conversation_id, data.source);
+                if (data.conversation_id && !activeConversationId) {
+                    activeConversationId = data.conversation_id;
+                }
+                loadConversationsList();
                 break;
             case "feedback_ack":
                 markFeedbackSent(data.message_id, data.rating);
@@ -401,8 +549,26 @@
             case "typing":
                 showTyping(data.text);
                 break;
+            case "conversation_switched":
+                // Server confirmed the conversation switch
+                break;
+            case "conversations_updated":
+                // Refresh sidebar conversation list
+                loadConversationsList();
+                break;
             case "system":
-                addSystemMessage(data.text);
+                // Show reminders and file alerts as prominent notifications
+                if (data.source === "reminder" || data.source === "file_watcher") {
+                    addNotificationMessage(data.text, data.source);
+                    showBrowserNotification(
+                        data.source === "reminder" ? "MyAi Reminder" : "MyAi File Alert",
+                        data.text.replace(/\*\*/g, "").substring(0, 100)
+                    );
+                    // Also play a sound
+                    try { new Audio("data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbsGczIj2markup_fixed").play(); } catch(e) {}
+                } else {
+                    addSystemMessage(data.text);
+                }
                 // Update current user if provided
                 if (data.user) {
                     currentUser = data.user;
@@ -526,6 +692,22 @@
         scrollToBottom();
     }
 
+    function addNotificationMessage(text, source) {
+        var $notif = document.createElement("div");
+        $notif.className = "notification-banner " + (source || "");
+        var icon = source === "reminder" ? "alarm" : "folder_open";
+        var title = source === "reminder" ? "Reminder" : "New File Detected";
+        var cleanText = text.replace(/\*\*/g, "").replace(/^Reminder:\s*/i, "");
+        $notif.innerHTML =
+            '<div class="notif-header">' +
+            '<span class="material-symbols-outlined notif-icon">' + icon + '</span>' +
+            '<span class="notif-title">' + title + '</span>' +
+            '</div>' +
+            '<div class="notif-body">' + escapeHtml(cleanText) + '</div>';
+        $messages.appendChild($notif);
+        scrollToBottom();
+    }
+
     function addErrorMessage(text) {
         var $msg = document.createElement("div");
         $msg.className = "message error";
@@ -540,7 +722,7 @@
         $welcome.id = "welcome";
         var userName = (currentUser && currentUser.display_name) ? currentUser.display_name : "there";
         $welcome.innerHTML =
-            '<h2>Welcome, ' + escapeHtml(userName) + '</h2>' +
+            '<h2>Welcome, <span class="accent-word">' + escapeHtml(userName) + '</span></h2>' +
             '<p>Your personal AI assistant. Ask anything, use commands like <code>/help</code>, ' +
             'or let the enterprise skills handle your requests automatically.</p>';
         $messages.appendChild($welcome);
@@ -569,8 +751,219 @@
     }
 
     function setConnStatus(state, text) {
-        $connStatus.className = "conn-badge " + state;
+        // Update dot
+        $connDot.className = "conn-dot " + state;
+        // Update label
+        $connStatus.className = "conn-label " + state;
         $connStatus.textContent = text;
+    }
+
+    // -- Conversations management --
+
+    function loadConversationsList() {
+        if (!authToken) return;
+
+        fetch("/api/conversations", {
+            headers: { "Authorization": "Bearer " + authToken },
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error("Failed to load conversations");
+                return r.json();
+            })
+            .then(function (data) {
+                conversationsList = data.conversations || [];
+                renderConversationsSidebar();
+            })
+            .catch(function () {
+                // Silently fail
+            });
+    }
+
+    function renderConversationsSidebar() {
+        if (!$recentChats) return;
+        $recentChats.innerHTML = "";
+
+        if (conversationsList.length === 0) {
+            var emptyMsg = document.createElement("div");
+            emptyMsg.className = "recent-chat-empty";
+            emptyMsg.textContent = "No conversations yet";
+            $recentChats.appendChild(emptyMsg);
+            return;
+        }
+
+        for (var i = 0; i < conversationsList.length; i++) {
+            var conv = conversationsList[i];
+            var $item = document.createElement("div");
+            $item.className = "recent-chat-item";
+            if (conv.id === activeConversationId) {
+                $item.classList.add("active");
+            }
+            $item.setAttribute("data-conv-id", conv.id);
+
+            var $title = document.createElement("span");
+            $title.className = "recent-chat-title";
+            $title.textContent = conv.title || "New Chat";
+            $title.title = conv.title || "New Chat";
+
+            var $actions = document.createElement("div");
+            $actions.className = "recent-chat-actions";
+
+            var $renameBtn = document.createElement("button");
+            $renameBtn.className = "recent-chat-action-btn";
+            $renameBtn.title = "Rename";
+            $renameBtn.innerHTML = '<span class="material-symbols-outlined" style="font-size:16px">edit</span>';
+            $renameBtn.setAttribute("data-conv-id", conv.id);
+            $renameBtn.addEventListener("click", (function (convId, convTitle) {
+                return function (e) {
+                    e.stopPropagation();
+                    promptRenameConversation(convId, convTitle);
+                };
+            })(conv.id, conv.title));
+
+            var $deleteBtn = document.createElement("button");
+            $deleteBtn.className = "recent-chat-action-btn";
+            $deleteBtn.title = "Delete";
+            $deleteBtn.innerHTML = '<span class="material-symbols-outlined" style="font-size:16px">delete</span>';
+            $deleteBtn.setAttribute("data-conv-id", conv.id);
+            $deleteBtn.addEventListener("click", (function (convId) {
+                return function (e) {
+                    e.stopPropagation();
+                    deleteConversation(convId);
+                };
+            })(conv.id));
+
+            $actions.appendChild($renameBtn);
+            $actions.appendChild($deleteBtn);
+
+            $item.appendChild($title);
+            $item.appendChild($actions);
+
+            $item.addEventListener("click", (function (convId) {
+                return function () {
+                    switchToConversation(convId);
+                };
+            })(conv.id));
+
+            $recentChats.appendChild($item);
+        }
+    }
+
+    function switchToConversation(convId) {
+        if (convId === activeConversationId) return;
+
+        activeConversationId = convId;
+
+        // Tell the server to switch
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: "switch_conversation",
+                conversation_id: convId,
+            }));
+        }
+
+        // Clear and reload messages for this conversation
+        $messages.innerHTML = "";
+        loadChatHistory(convId);
+
+        // Update sidebar highlight
+        renderConversationsSidebar();
+    }
+
+    function createNewConversation() {
+        if (!authToken) return;
+
+        fetch("/api/conversations", {
+            method: "POST",
+            headers: {
+                "Authorization": "Bearer " + authToken,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({}),
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error("Failed to create conversation");
+                return r.json();
+            })
+            .then(function (data) {
+                var newConvId = data.conversation_id;
+                activeConversationId = newConvId;
+
+                // Tell server to switch
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: "switch_conversation",
+                        conversation_id: newConvId,
+                    }));
+                }
+
+                // Clear messages and show welcome
+                $messages.innerHTML = "";
+                showWelcome();
+
+                // Reload sidebar
+                loadConversationsList();
+            })
+            .catch(function (err) {
+                addSystemMessage("Failed to create new conversation.");
+            });
+    }
+
+    function deleteConversation(convId) {
+        if (!confirm("Delete this conversation? This cannot be undone.")) return;
+        if (!authToken) return;
+
+        fetch("/api/conversations/" + encodeURIComponent(convId), {
+            method: "DELETE",
+            headers: { "Authorization": "Bearer " + authToken },
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error("Failed to delete");
+                return r.json();
+            })
+            .then(function () {
+                // If we deleted the active conversation, switch to a new one
+                if (convId === activeConversationId) {
+                    activeConversationId = null;
+                    $messages.innerHTML = "";
+                    showWelcome();
+
+                    // Tell server to reset
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: "switch_conversation",
+                            conversation_id: null,
+                        }));
+                    }
+                }
+                loadConversationsList();
+            })
+            .catch(function () {
+                addSystemMessage("Failed to delete conversation.");
+            });
+    }
+
+    function promptRenameConversation(convId, currentTitle) {
+        var newTitle = prompt("Rename conversation:", currentTitle || "");
+        if (newTitle === null || newTitle.trim() === "") return;
+
+        fetch("/api/conversations/" + encodeURIComponent(convId) + "/rename", {
+            method: "POST",
+            headers: {
+                "Authorization": "Bearer " + authToken,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ title: newTitle.trim() }),
+        })
+            .then(function (r) {
+                if (!r.ok) throw new Error("Failed to rename");
+                return r.json();
+            })
+            .then(function () {
+                loadConversationsList();
+            })
+            .catch(function () {
+                addSystemMessage("Failed to rename conversation.");
+            });
     }
 
     function clearChat() {
@@ -627,6 +1020,10 @@
         }
         if (data.model) {
             $statusModel.textContent = data.model;
+            // Also update the header model pill
+            if ($modelPillName) {
+                $modelPillName.textContent = data.model;
+            }
         }
         if (data.graph !== undefined) {
             var graphText = data.graph === true ? "Connected" :
@@ -635,6 +1032,18 @@
                              data.graph === "configured" ? "partial" : "offline";
             $statusGraph.textContent = graphText;
             $statusGraph.className = "status-badge " + graphClass;
+
+            // Update MS365 pill in header
+            if ($ms365Pill) {
+                $ms365Pill.className = "ms365-pill " + graphClass;
+                if (data.graph === true) {
+                    $ms365StatusText.textContent = "M365";
+                } else if (data.graph === "configured") {
+                    $ms365StatusText.textContent = "M365";
+                } else {
+                    $ms365StatusText.textContent = "M365";
+                }
+            }
         }
         if (data.search !== undefined) {
             $statusSearch.textContent = data.search ? "On" : "Off";
@@ -661,8 +1070,16 @@
 
     // -- Formatting --
     function formatMessage(text) {
+        // Preserve raw HTML elements (like connect buttons) before escaping
+        var rawHtmlParts = [];
+        var preserved = text.replace(/<a\s[^>]*>.*?<\/a>/gi, function (match) {
+            var idx = rawHtmlParts.length;
+            rawHtmlParts.push(match);
+            return "%%HTML" + idx + "%%";
+        });
+
         // Basic markdown-like formatting
-        var html = escapeHtml(text);
+        var html = escapeHtml(preserved);
 
         // Code blocks (```...```)
         html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function (_, lang, code) {
@@ -685,9 +1102,18 @@
         html = html.replace(/&lt;(https?:\/\/[^|&]+)\|([^&]+)&gt;/g,
             '<a href="$1" target="_blank" rel="noopener" style="color:var(--accent)">$2</a>');
 
-        // Plain URLs
-        html = html.replace(/(https?:\/\/[^\s<]+)/g,
+        // Markdown links [text](url)
+        html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+            '<a href="$2" target="_blank" rel="noopener" style="color:var(--accent)">$1</a>');
+
+        // Plain URLs (only those not already in an href)
+        html = html.replace(/(?<!href="|">)(https?:\/\/[^\s<]+)/g,
             '<a href="$1" target="_blank" rel="noopener" style="color:var(--accent)">$1</a>');
+
+        // Restore preserved HTML elements
+        for (var i = 0; i < rawHtmlParts.length; i++) {
+            html = html.replace("%%HTML" + i + "%%", rawHtmlParts[i]);
+        }
 
         return html;
     }
@@ -696,6 +1122,19 @@
         var div = document.createElement("div");
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    function showBrowserNotification(title, body) {
+        if (!("Notification" in window)) return;
+        if (Notification.permission === "granted") {
+            new Notification(title, { body: body, icon: "/static/favicon.ico" });
+        } else if (Notification.permission !== "denied") {
+            Notification.requestPermission().then(function (perm) {
+                if (perm === "granted") {
+                    new Notification(title, { body: body });
+                }
+            });
+        }
     }
 
     function formatTime() {
@@ -740,7 +1179,24 @@
             $sidebar.classList.toggle("collapsed");
         });
 
-        $clearBtn.addEventListener("click", clearChat);
+        // New Chat button creates a new conversation
+        if ($btnNewChat) {
+            $btnNewChat.addEventListener("click", createNewConversation);
+        }
+
+        // Settings button opens modal
+        if ($btnSettings) {
+            $btnSettings.addEventListener("click", function () {
+                $settingsModal.classList.remove("hidden");
+            });
+        }
+
+        // Status toggle
+        if ($btnStatusToggle) {
+            $btnStatusToggle.addEventListener("click", function () {
+                $statusPanel.classList.toggle("hidden");
+            });
+        }
 
         // Web search toggle
         if ($searchToggle) {

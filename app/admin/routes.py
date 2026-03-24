@@ -261,9 +261,31 @@ async def admin_activate_user(req: web.Request) -> web.Response:
 # ── Admin page serving ──
 
 
-async def admin_page(req: web.Request) -> web.FileResponse:
-    """Serve the admin dashboard HTML page."""
-    return web.FileResponse(Path(__file__).parent.parent.parent / "web" / "admin.html")
+async def admin_page(req: web.Request) -> web.Response:
+    """Serve the admin dashboard HTML page with token injection from query param."""
+    html_path = Path(__file__).parent.parent.parent / "web" / "admin.html"
+    html = html_path.read_text(encoding="utf-8")
+
+    token = req.query.get("token", "")
+    token_escaped = token.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+
+    token_script = f"""<script>
+(function(){{
+    var urlToken = '{token_escaped}';
+    var t = urlToken || localStorage.getItem("myai_auth_token") || localStorage.getItem("myai_token") || "";
+    if (t) {{
+        localStorage.setItem("myai_auth_token", t);
+        localStorage.setItem("myai_token", t);
+    }}
+    // Clean token from URL bar
+    if (urlToken && window.history.replaceState) {{
+        window.history.replaceState(null, "", window.location.pathname);
+    }}
+}})();
+</script>"""
+
+    html = html.replace("</head>", token_script + "\n</head>")
+    return web.Response(text=html, content_type="text/html")
 
 
 # ── Route registration helper ──

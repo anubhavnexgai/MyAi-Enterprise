@@ -31,6 +31,9 @@ class ToolRegistry:
             "write_file": self._write_file,
             "web_search": self._web_search,
             "rag_query": self._rag_query,
+            "send_email": self._send_email,
+            "send_whatsapp": self._send_whatsapp,
+            "set_reminder": self._set_reminder,
         }
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -73,27 +76,122 @@ class ToolRegistry:
     async def _rag_query(self, question: str) -> str:
         return await self.rag_service.query(question)
 
+    async def _send_email(self, to: str, subject: str, body: str) -> str:
+        """Create .eml draft and open in Outlook."""
+        import tempfile
+        import os
+
+        # Write .eml manually to avoid MIME line wrapping
+        eml_content = (
+            f"To: {to}\r\n"
+            f"Subject: {subject}\r\n"
+            f"X-Unsent: 1\r\n"
+            f"Content-Type: text/plain; charset=utf-8\r\n"
+            f"\r\n"
+            f"{body}"
+        )
+
+        eml_path = os.path.join(tempfile.gettempdir(), "myai_draft.eml")
+        with open(eml_path, "w", encoding="utf-8") as f:
+            f.write(eml_content)
+
+        try:
+            os.startfile(eml_path)
+            return (
+                f"Email draft opened in Outlook.\n"
+                f"To: {to}\n"
+                f"Subject: {subject}\n\n"
+                f"Review and click Send."
+            )
+        except Exception as e:
+            return f"Failed to open email: {e}"
+
+    _reminder_service = None  # Set by main.py
+    _reminder_user_id = None  # Set per-request
+
+    async def _set_reminder(self, time: str, message: str) -> str:
+        """Set a reminder using the reminder service."""
+        if not self._reminder_service:
+            return "Reminder service is not available."
+
+        from app.services.reminders import ReminderService
+        due_at = ReminderService.parse_time_expression(time)
+        if not due_at:
+            return f"Couldn't understand the time: '{time}'. Try 'in 5 minutes', 'at 3pm', or 'tomorrow at 9am'."
+
+        user_id = self._reminder_user_id or "default"
+        reminder = self._reminder_service.add_reminder(user_id, message, due_at)
+        return (
+            f"Reminder set!\n"
+            f"Message: {message}\n"
+            f"Due: {due_at.strftime('%I:%M %p, %B %d')}"
+        )
+
+    async def _send_whatsapp(self, phone: str, message: str) -> str:
+        """Open WhatsApp Web with a pre-filled message."""
+        import subprocess
+        from urllib.parse import quote
+
+        # Clean phone number — remove spaces, dashes, plus
+        clean_phone = phone.replace(" ", "").replace("-", "").replace("+", "")
+
+        # Use wa.me URL which opens WhatsApp Web or desktop app
+        wa_url = f"https://wa.me/{clean_phone}?text={quote(message)}"
+
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", "start", "", wa_url],
+                creationflags=0x08000000,
+            )
+            return (
+                f"WhatsApp message drafted.\n"
+                f"To: {phone}\n"
+                f"Message: {message}\n\n"
+                f"WhatsApp opened — just click Send."
+            )
+        except Exception as e:
+            return f"Failed to open WhatsApp: {e}"
+
     @staticmethod
     def parse_tool_call(text: str) -> dict | None:
         """Extract a tool call JSON from the model's response."""
-        # Look for ```tool ... ``` blocks
         import re
 
+        # 1. Look for ```tool ... ``` blocks
         pattern = r"```tool\s*\n?\s*(\{.*?\})\s*\n?\s*```"
         match = re.search(pattern, text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group(1))
+                parsed = json.loads(match.group(1))
+                return ToolRegistry._normalize_tool_call(parsed)
             except json.JSONDecodeError:
-                return None
+                pass
 
-        # Also try bare JSON with "name" and "arguments" keys
-        pattern2 = r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\}'
-        match2 = re.search(pattern2, text, re.DOTALL)
-        if match2:
+        # 2. Look for ```json ... ``` or ``` ... ``` blocks containing tool calls
+        pattern_code = r"```(?:json)?\s*\n?\s*(\{.*?\})\s*\n?\s*```"
+        for m in re.finditer(pattern_code, text, re.DOTALL):
             try:
-                return json.loads(match2.group(0))
+                parsed = json.loads(m.group(1))
+                if "name" in parsed and ("arguments" in parsed or "parameters" in parsed):
+                    return ToolRegistry._normalize_tool_call(parsed)
             except json.JSONDecodeError:
-                return None
+                continue
+
+        # 3. Try bare JSON with "name" key
+        pattern3 = r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"(?:arguments|parameters)"\s*:\s*\{.*?\}\s*\}'
+        match3 = re.search(pattern3, text, re.DOTALL)
+        if match3:
+            try:
+                parsed = json.loads(match3.group(0))
+                return ToolRegistry._normalize_tool_call(parsed)
+            except json.JSONDecodeError:
+                pass
 
         return None
+
+    @staticmethod
+    def _normalize_tool_call(parsed: dict) -> dict:
+        """Normalize tool call dict — handle 'parameters' vs 'arguments' key."""
+        if "parameters" in parsed and "arguments" not in parsed:
+            parsed["arguments"] = parsed.pop("parameters")
+        return parsed

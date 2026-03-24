@@ -97,11 +97,20 @@ class NexgAIClient:
         )
 
     @property
+    def _local_mode(self) -> bool:
+        """True when connecting to a local NexgAI instance without auth."""
+        return bool(
+            settings.nexgai_enabled
+            and settings.nexgai_base_url
+            and not settings.nexgai_service_user
+        )
+
+    @property
     def is_configured(self) -> bool:
         return bool(
             settings.nexgai_enabled
             and settings.nexgai_base_url
-            and settings.nexgai_service_user
+            and (settings.nexgai_service_user or self._local_mode)
         )
 
     @property
@@ -116,9 +125,16 @@ class NexgAIClient:
         Since NexgAI uses SSO (redirect-based), for service-to-service we
         use a direct token endpoint if available, or fall back to storing
         pre-provisioned tokens via environment variables.
+        In local mode (no service_user), skip auth entirely.
         """
         if not self.is_configured:
             return False
+
+        if self._local_mode:
+            self._access_token = "local-dev-no-auth"
+            self._token_expires_at = time.monotonic() + 86400
+            logger.info("NexgAI local mode — skipping authentication")
+            return True
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -169,6 +185,8 @@ class NexgAIClient:
 
     async def _ensure_token(self) -> str | None:
         """Return a valid access token, refreshing if needed."""
+        if self._local_mode:
+            return "local-dev-no-auth"
         if self._access_token and time.monotonic() < self._token_expires_at:
             return self._access_token
         if await self.authenticate():
@@ -177,7 +195,9 @@ class NexgAIClient:
 
     def _auth_headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self._access_token:
+        if self._local_mode:
+            headers["X-Tenant-ID"] = self.tenant_id
+        elif self._access_token:
             headers["Authorization"] = f"Bearer {self._access_token}"
         return headers
 
@@ -189,7 +209,7 @@ class NexgAIClient:
             return False
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(f"{self.base_url}/api/v3/chat/health")
+                resp = await client.get(f"{self.base_url}/health")
                 return resp.status_code == 200
         except Exception:
             return False
@@ -198,9 +218,13 @@ class NexgAIClient:
 
     async def create_session(self) -> str | None:
         """Create a new NexgAI chat session and return its ID."""
+        import uuid
         token = await self._ensure_token()
         if not token:
             return None
+        # In local mode, generate session ID locally (platform creates sessions on first message)
+        if self._local_mode:
+            return f"myai-{uuid.uuid4()}"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(
@@ -238,7 +262,7 @@ class NexgAIClient:
             "message": message,
             "session_id": session_id,
             "tenant_id": self.tenant_id,
-            "channel": "api",
+
             "user_type": "employee",
             "authenticated": True,
         }
@@ -290,7 +314,7 @@ class NexgAIClient:
             "message": message,
             "session_id": session_id,
             "tenant_id": self.tenant_id,
-            "channel": "api",
+
             "user_type": "employee",
             "authenticated": True,
         }

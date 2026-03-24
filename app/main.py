@@ -5,6 +5,9 @@ Run with: python -m app.main           (Slack + Web UI)
 """
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 import json
 import logging
@@ -31,10 +34,15 @@ from app.services.encryption import ConfigEncryption
 from app.services.indexing import IndexingService
 from app.services.nexgai_client import NexgAIClient
 from app.services.web_search import WebSearchService
+from app.services.file_access import FileAccessService
+from app.agent.tools import ToolRegistry
 from app.learning.feedback_service import FeedbackService
 from app.learning.engine import LearningEngine
 from app.learning.routes import setup_learning_routes
 from app.storage.database import Database
+from app.services.file_watcher import FileWatcherService
+from app.services.reminders import ReminderService
+from app.services.whatsapp import WhatsAppService
 
 # -- Logging --
 logging.basicConfig(
@@ -62,13 +70,22 @@ indexing_service = IndexingService(database, rag_service, doc_processor, encrypt
 # -- Initialize NexgAI integration --
 nexgai_client = NexgAIClient()
 
-# -- Initialize web search --
+# -- Initialize web search and file access --
 search_service = WebSearchService()
+file_service = FileAccessService()
 
-# -- Initialize agent (NexgAI agents + Ollama LLM) --
+# -- Initialize file watcher and reminders --
+file_watcher = FileWatcherService()
+reminder_service = ReminderService()
+whatsapp_service = WhatsAppService()
+tool_registry = ToolRegistry(file_service, search_service, rag_service)
+tool_registry._reminder_service = reminder_service
+
+# -- Initialize agent (NexgAI agents + Ollama LLM with tools) --
 agent = AgentCore(
     ollama_client, database,
     nexgai_client=nexgai_client if nexgai_client.is_configured else None,
+    tools=tool_registry,
 )
 agent.rbac_service = rbac_service
 
@@ -394,8 +411,34 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
     user_id = "web-user-anon"
     user_name = "User"
     auth_user = None  # Will hold the authenticated User object
+    active_conversation_id = None  # Track which conversation the user is chatting in
+    briefing_shown = False  # Only show briefing once per WebSocket session
 
     logger.info(f"WebSocket client connected from {req.remote}")
+
+    # Background task: periodically check for file notifications
+    async def _file_notification_loop():
+        """Send file watcher notifications every 30 seconds."""
+        try:
+            while not ws.closed:
+                await asyncio.sleep(30)
+                if ws.closed:
+                    break
+                try:
+                    file_notifs = file_watcher.get_pending_notifications()
+                    if file_notifs:
+                        notif_msg = file_watcher.format_notifications_message(file_notifs)
+                        await ws.send_json({
+                            "type": "system",
+                            "text": notif_msg,
+                            "source": "file_watcher",
+                        })
+                except Exception as e:
+                    logger.debug(f"File notification periodic check error: {e}")
+        except asyncio.CancelledError:
+            pass
+
+    file_notif_task = asyncio.create_task(_file_notification_loop())
 
     try:
         async for msg in ws:
@@ -424,6 +467,40 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                                 "text": f"Connected as {user_name}",
                                 "user": validated_user.to_dict(),
                             })
+
+                            # Auto-briefing on login (only once per session)
+                            if not briefing_shown:
+                                briefing_shown = True
+                                try:
+                                    from app.services.briefing import generate_briefing
+                                    briefing = await generate_briefing(
+                                        user_name=user_name,
+                                        user_id=user_id,
+                                        ollama=ollama_client,
+                                        database=database,
+                                    )
+                                    if briefing:
+                                        await ws.send_json({
+                                            "type": "response",
+                                            "text": briefing,
+                                            "source": "briefing",
+                                        })
+                                except Exception as e:
+                                    logger.warning(f"Briefing generation failed: {e}")
+
+                            # Check for any pending file notifications
+                            try:
+                                file_notifs = file_watcher.get_pending_notifications()
+                                if file_notifs:
+                                    notif_msg = file_watcher.format_notifications_message(file_notifs)
+                                    await ws.send_json({
+                                        "type": "system",
+                                        "text": notif_msg,
+                                        "source": "file_watcher",
+                                    })
+                            except Exception as e:
+                                logger.warning(f"File notification check failed: {e}")
+
                             continue
                         else:
                             await ws.send_json({
@@ -468,6 +545,31 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                         })
                     continue
 
+                if msg_type == "switch_conversation":
+                    conv_id = data.get("conversation_id")
+                    if conv_id:
+                        # Verify user owns this conversation
+                        owner = await database.get_conversation_owner(conv_id)
+                        if owner == user_id:
+                            active_conversation_id = conv_id
+                            await ws.send_json({
+                                "type": "conversation_switched",
+                                "conversation_id": conv_id,
+                            })
+                        else:
+                            await ws.send_json({
+                                "type": "error",
+                                "text": "Conversation not found or not authorized.",
+                            })
+                    else:
+                        # Switch to no specific conversation (will use default)
+                        active_conversation_id = None
+                        await ws.send_json({
+                            "type": "conversation_switched",
+                            "conversation_id": None,
+                        })
+                    continue
+
                 if msg_type == "message":
                     text = (data.get("text") or "").strip()
                     if not text:
@@ -491,17 +593,132 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                                 text, user_id, user_name,
                             )
                             if response is not None:
+                                # Handle /admin — open dashboard
+                                if response == "OPEN_ADMIN":
+                                    token_val = token or ""
+                                    await ws.send_json({
+                                        "type": "response",
+                                        "text": "",
+                                        "action": "open_admin",
+                                        "admin_url": f"/admin?token={token_val}",
+                                    })
+                                    continue
+                                # Replace CONNECT_MICROSOFT with a connect action
+                                if "CONNECT_MICROSOFT" in response:
+                                    token_val = token or ""
+                                    response = response.replace("CONNECT_MICROSOFT", "").strip()
+                                    await ws.send_json({
+                                        "type": "response",
+                                        "text": response,
+                                        "action": "connect_microsoft",
+                                        "connect_url": f"/auth/microsoft?token={token_val}",
+                                    })
+                                    continue
                                 await ws.send_json({
                                     "type": "response",
                                     "text": response,
                                 })
                                 continue
 
+                        # Pre-intercept: handle action commands directly (LLM is unreliable for tool calls)
+                        import re as _re
+                        _handled = False
+
+                        # -- Reminder intercept --
+                        _remind_match = _re.match(
+                            r"(?:remind me|set a reminder|reminder)\s+"
+                            r"(in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?|seconds?)"
+                            r"|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?"
+                            r"|tomorrow\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)"
+                            r"\s+(?:to\s+)?(.+)",
+                            text, _re.IGNORECASE,
+                        )
+                        if _remind_match:
+                            _time_expr = _remind_match.group(1).strip()
+                            _rem_msg = _remind_match.group(2).strip()
+                            _due = reminder_service.parse_time_expression(_time_expr)
+                            if _due:
+                                reminder_service.add_reminder(user_id, _rem_msg, _due)
+                                await ws.send_json({
+                                    "type": "response",
+                                    "text": f"Reminder set for {_due.strftime('%I:%M %p')}: {_rem_msg}",
+                                })
+                                _handled = True
+
+                        # -- Email intercept (LLM drafts body, code sends) --
+                        if not _handled:
+                            _email_match = _re.match(
+                                r"(?:send|draft|write)\s+(?:an?\s+)?(?:email|mail)\s+to\s+([\w.+-]+@[\w.-]+)"
+                                r"(?:\s+with\s+subject\s+[\"']?(.+?)[\"']?)?"
+                                r"\s+(?:saying|with\s+body|body|that|with\s+message|about)\s+(.+)",
+                                text, _re.IGNORECASE | _re.DOTALL,
+                            )
+                            if _email_match:
+                                _to = _email_match.group(1).strip()
+                                _subject_hint = (_email_match.group(2) or "").strip()
+                                _body_hint = _email_match.group(3).strip()
+
+                                await ws.send_json({"type": "typing"})
+
+                                # Use LLM to draft the email
+                                _draft_prompt = (
+                                    f"Draft a professional email.\n"
+                                    f"To: {_to}\n"
+                                    f"{'Subject: ' + _subject_hint if _subject_hint else 'Generate an appropriate subject.'}\n"
+                                    f"The email should be about: {_body_hint}\n\n"
+                                    f"Reply in this EXACT format (no other text):\n"
+                                    f"SUBJECT: <subject line>\n"
+                                    f"BODY:\n<email body>"
+                                )
+                                _draft_result = await ollama_client.chat(messages=[
+                                    {"role": "system", "content": "You draft professional emails. Reply ONLY in the format requested. Sign off as Anubhav Choudhury."},
+                                    {"role": "user", "content": _draft_prompt},
+                                ])
+                                _draft_text = _draft_result.get("message", {}).get("content", "").strip()
+
+                                # Parse subject and body from LLM response
+                                _subject = _subject_hint or "Message from MyAi"
+                                _body = _body_hint
+                                _subj_match = _re.search(r"SUBJECT:\s*(.+)", _draft_text)
+                                _body_match = _re.search(r"BODY:\s*\n?([\s\S]+)", _draft_text)
+                                if _subj_match:
+                                    _subject = _subj_match.group(1).strip()
+                                if _body_match:
+                                    _body = _body_match.group(1).strip()
+
+                                _result = await tool_registry._send_email(_to, _subject, _body)
+                                await ws.send_json({
+                                    "type": "response",
+                                    "text": _result,
+                                })
+                                _handled = True
+
+                        # -- WhatsApp intercept --
+                        if not _handled:
+                            _wa_match = _re.match(
+                                r"(?:send|write)\s+(?:a\s+)?(?:whatsapp|wa)\s+(?:message\s+)?to\s+([\d+]+)\s+(?:saying|that|with\s+message)\s+(.+)",
+                                text, _re.IGNORECASE | _re.DOTALL,
+                            )
+                            if _wa_match:
+                                _phone = _wa_match.group(1).strip()
+                                _wa_msg = _wa_match.group(2).strip()
+                                _result = await tool_registry._send_whatsapp(_phone, _wa_msg)
+                                await ws.send_json({
+                                    "type": "response",
+                                    "text": _result,
+                                })
+                                _handled = True
+
+                        if _handled:
+                            continue
+
                         # Process through agent with streaming support
-                        if nexgai_client.is_configured and nexgai_client.is_available:
+                        # Only use streaming when NexgAI has real auth (not local mode)
+                        if nexgai_client.is_configured and nexgai_client.is_available and not nexgai_client._local_mode:
                             # Use streaming path — relay NexgAI SSE chunks as WebSocket messages
                             async for event in agent.process_message_streaming(
                                 user_id, text, user_name, user=auth_user,
+                                conversation_id=active_conversation_id,
                             ):
                                 ev_type = event.get("type")
                                 if ev_type == "stream_start":
@@ -534,9 +751,13 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                                         "source": event.get("source", "local"),
                                     })
                         else:
+                            # Set reminder user context
+                            tool_registry._reminder_user_id = user_id
+
                             # Non-streaming path (NexgAI not configured)
                             result = await agent.process_message(
                                 user_id, text, user_name, user=auth_user,
+                                conversation_id=active_conversation_id,
                             )
                             await ws.send_json({
                                 "type": "response",
@@ -556,6 +777,12 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
             elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                 break
     finally:
+        # Cancel the periodic file notification task
+        file_notif_task.cancel()
+        try:
+            await file_notif_task
+        except asyncio.CancelledError:
+            pass
         # Clean up
         if user_id in _ws_clients and _ws_clients[user_id] is ws:
             del _ws_clients[user_id]
@@ -566,6 +793,60 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
 
 async def _handle_web_command(text: str, user_id: str, user_name: str) -> str | None:
     """Handle slash commands from the Web UI (reuses bot logic)."""
+
+    # Handle /admin — return instruction to open dashboard
+    if text.strip() == "/admin":
+        return "OPEN_ADMIN"
+
+    # Handle /remind command
+    if text.startswith("/remind "):
+        parts = text[8:].strip()
+        # Parse: /remind <time> <message>
+        # Examples: /remind in 5 minutes check the build
+        #           /remind at 3pm sprint review
+        #           /remind tomorrow at 9am standup prep
+        time_keywords = ["in ", "at ", "tomorrow "]
+        time_expr = ""
+        message = parts
+
+        for kw in time_keywords:
+            if parts.lower().startswith(kw):
+                # Find where the time expression ends and message begins
+                import re
+                m = re.match(
+                    r"(in\s+\d+\s*(?:minutes?|seconds?|hours?|mins?|hrs?)|"
+                    r"tomorrow\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|"
+                    r"at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(.*)",
+                    parts, re.IGNORECASE,
+                )
+                if m:
+                    time_expr = m.group(1).strip()
+                    message = m.group(2).strip()
+                break
+
+        if not time_expr:
+            return "**Usage:** `/remind <time> <message>`\n\nExamples:\n- `/remind in 5 minutes check the build`\n- `/remind at 3pm sprint review`\n- `/remind tomorrow at 9am prepare standup`"
+
+        due_at = reminder_service.parse_time_expression(time_expr)
+        if not due_at:
+            return f"Couldn't understand the time: '{time_expr}'. Try 'in 5 minutes', 'at 3pm', or 'tomorrow at 9am'."
+
+        if not message:
+            return "Please include a message for the reminder."
+
+        reminder = reminder_service.add_reminder(user_id, message, due_at)
+        return f"**Reminder set!**\n\n{message}\n\nDue: {due_at.strftime('%I:%M %p, %B %d')}"
+
+    # Handle /reminders command — list active reminders
+    if text.strip() == "/reminders":
+        reminders = reminder_service.list_reminders(user_id)
+        if not reminders:
+            return "No active reminders."
+        lines = ["**Active Reminders:**\n"]
+        for r in reminders:
+            lines.append(f"- {r.message} — {r.due_at.strftime('%I:%M %p, %B %d')} (`{r.id}`)")
+        return "\n".join(lines)
+
     # Reuse the bot's command handler with a dummy say function
     responses = []
 
@@ -580,7 +861,250 @@ async def _handle_web_command(text: str, user_id: str, user_name: str) -> str | 
     return None
 
 
+# -- WhatsApp Webhook --
+
+async def whatsapp_webhook(req: web.Request) -> web.Response:
+    """Handle incoming WhatsApp messages from Twilio."""
+    try:
+        data = await req.post()
+        from_number = data.get("From", "").replace("whatsapp:", "")
+        body = data.get("Body", "").strip()
+
+        if not body:
+            return web.Response(text="", content_type="text/xml")
+
+        logger.info(f"WhatsApp message from {from_number}: {body}")
+
+        # Find the first connected web user to link WhatsApp to their account
+        # This way WhatsApp messages appear in the same account's conversations
+        linked_user_id = None
+        linked_user_name = "User"
+        for client_id in _ws_clients:
+            if not client_id.startswith("wa-"):
+                linked_user_id = client_id
+                break
+
+        # Create or get a WhatsApp conversation for this user
+        wa_conv_title = f"WhatsApp ({from_number[-4:]})"
+        if linked_user_id:
+            user_id_for_msg = linked_user_id
+            # Find existing WhatsApp conversation or create one
+            convos = await database.list_conversations(linked_user_id)
+            wa_conv_id = None
+            for c in convos:
+                if c.get("title", "").startswith("WhatsApp"):
+                    wa_conv_id = c["id"]
+                    break
+            if not wa_conv_id:
+                wa_conv_id = await database.create_conversation(linked_user_id, wa_conv_title)
+        else:
+            user_id_for_msg = f"wa-{from_number}"
+            wa_conv_id = None
+
+        # Pre-intercept reminders (LLM is unreliable)
+        import re as _re
+        _remind_match = _re.match(
+            r"(?:remind me|set a reminder|reminder)\s+"
+            r"(in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?|seconds?)"
+            r"|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?"
+            r"|tomorrow\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)"
+            r"\s+(?:to\s+)?(.+)",
+            body, _re.IGNORECASE,
+        )
+        if _remind_match:
+            _time_expr = _remind_match.group(1).strip()
+            _rem_msg = _remind_match.group(2).strip()
+            _due = reminder_service.parse_time_expression(_time_expr)
+            if _due:
+                reminder_service.add_reminder(user_id_for_msg, _rem_msg, _due)
+                twiml = whatsapp_service.create_twiml_response(
+                    f"Reminder set for {_due.strftime('%I:%M %p')}: {_rem_msg}"
+                )
+                return web.Response(text=twiml, content_type="text/xml")
+
+        # Process through the agent using the linked user's account
+        result = await agent.process_message(
+            user_id_for_msg, body, user_name=linked_user_name,
+            conversation_id=wa_conv_id,
+        )
+        response_text = result.get("text", "Sorry, something went wrong.")
+
+        # Truncate if too long for WhatsApp (1600 char limit)
+        if len(response_text) > 1500:
+            response_text = response_text[:1500] + "..."
+
+        # Silently refresh conversation list in web UI (no notifications)
+        for client_id, client_ws in _ws_clients.items():
+            if not client_ws.closed:
+                try:
+                    await client_ws.send_json({"type": "conversations_updated"})
+                except Exception:
+                    pass
+
+        # Send reply via TwiML
+        twiml = whatsapp_service.create_twiml_response(response_text)
+        return web.Response(text=twiml, content_type="text/xml")
+
+    except Exception as e:
+        logger.error(f"WhatsApp webhook error: {e}", exc_info=True)
+        twiml = whatsapp_service.create_twiml_response("Sorry, an error occurred.")
+        return web.Response(text=twiml, content_type="text/xml")
+
+
+# -- Microsoft Connect redirect --
+
+async def microsoft_connect(req: web.Request) -> web.Response:
+    """Redirect to Microsoft OAuth2 login page."""
+    token = req.query.get("token", "")
+    if not token:
+        return web.json_response({"error": "No token"}, status=401)
+    user = await auth_service.validate_session(token)
+    if not user:
+        return web.json_response({"error": "Invalid token"}, status=401)
+    if not graph_client.is_configured:
+        return web.Response(text="Microsoft 365 not configured", status=500)
+    auth_url = graph_client.get_auth_url(state=user.id)
+    raise web.HTTPFound(location=auth_url)
+
+
 # -- Web UI API endpoints --
+
+async def chat_history(req: web.Request) -> web.Response:
+    """Return chat history for the authenticated user."""
+    try:
+        token = _extract_token(req)
+        if not token:
+            return web.json_response({"error": "No token provided"}, status=401)
+
+        user = await auth_service.validate_session(token)
+        if not user:
+            return web.json_response({"error": "Invalid or expired token"}, status=401)
+
+        limit = int(req.query.get("limit", "50"))
+        limit = max(1, min(limit, 200))  # clamp between 1 and 200
+
+        messages = await database.get_chat_history(user.id, limit=limit)
+        return web.json_response({"messages": messages})
+    except Exception as e:
+        logger.error(f"Chat history error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def list_conversations(req: web.Request) -> web.Response:
+    """List all conversations for the authenticated user."""
+    try:
+        token = _extract_token(req)
+        if not token:
+            return web.json_response({"error": "No token provided"}, status=401)
+        user = await auth_service.validate_session(token)
+        if not user:
+            return web.json_response({"error": "Invalid or expired token"}, status=401)
+
+        conversations = await database.list_conversations(user.id)
+        return web.json_response({"conversations": conversations})
+    except Exception as e:
+        logger.error(f"List conversations error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def create_conversation(req: web.Request) -> web.Response:
+    """Create a new conversation for the authenticated user."""
+    try:
+        token = _extract_token(req)
+        if not token:
+            return web.json_response({"error": "No token provided"}, status=401)
+        user = await auth_service.validate_session(token)
+        if not user:
+            return web.json_response({"error": "Invalid or expired token"}, status=401)
+
+        title = ""
+        try:
+            body = await req.json()
+            title = (body.get("title") or "").strip()
+        except Exception:
+            pass
+
+        conv_id = await database.create_conversation(user.id, title=title)
+        return web.json_response({"conversation_id": conv_id, "title": title or "New Chat"})
+    except Exception as e:
+        logger.error(f"Create conversation error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def delete_conversation_endpoint(req: web.Request) -> web.Response:
+    """Delete a conversation owned by the authenticated user."""
+    try:
+        token = _extract_token(req)
+        if not token:
+            return web.json_response({"error": "No token provided"}, status=401)
+        user = await auth_service.validate_session(token)
+        if not user:
+            return web.json_response({"error": "Invalid or expired token"}, status=401)
+
+        conv_id = req.match_info["id"]
+        # Verify ownership
+        owner = await database.get_conversation_owner(conv_id)
+        if owner != user.id:
+            return web.json_response({"error": "Not found or not authorized"}, status=404)
+
+        await database.delete_conversation(conv_id)
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Delete conversation error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def rename_conversation_endpoint(req: web.Request) -> web.Response:
+    """Rename a conversation owned by the authenticated user."""
+    try:
+        token = _extract_token(req)
+        if not token:
+            return web.json_response({"error": "No token provided"}, status=401)
+        user = await auth_service.validate_session(token)
+        if not user:
+            return web.json_response({"error": "Invalid or expired token"}, status=401)
+
+        conv_id = req.match_info["id"]
+        owner = await database.get_conversation_owner(conv_id)
+        if owner != user.id:
+            return web.json_response({"error": "Not found or not authorized"}, status=404)
+
+        body = await req.json()
+        title = (body.get("title") or "").strip()
+        if not title:
+            return web.json_response({"error": "title is required"}, status=400)
+
+        await database.rename_conversation(conv_id, title)
+        return web.json_response({"status": "ok", "title": title})
+    except Exception as e:
+        logger.error(f"Rename conversation error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def conversation_history(req: web.Request) -> web.Response:
+    """Return chat history for a specific conversation."""
+    try:
+        token = _extract_token(req)
+        if not token:
+            return web.json_response({"error": "No token provided"}, status=401)
+        user = await auth_service.validate_session(token)
+        if not user:
+            return web.json_response({"error": "Invalid or expired token"}, status=401)
+
+        conv_id = req.match_info["id"]
+        owner = await database.get_conversation_owner(conv_id)
+        if owner != user.id:
+            return web.json_response({"error": "Not found or not authorized"}, status=404)
+
+        limit = int(req.query.get("limit", "50"))
+        limit = max(1, min(limit, 200))
+
+        messages = await database.get_chat_history(user.id, limit=limit, conversation_id=conv_id)
+        return web.json_response({"messages": messages})
+    except Exception as e:
+        logger.error(f"Conversation history error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
 
 async def web_status(req: web.Request) -> web.Response:
     """Status info for the Web UI sidebar."""
@@ -660,6 +1184,8 @@ def create_debug_app() -> web.Application:
     # Health & debug
     app.router.add_get("/health", health)
     app.router.add_get("/auth/callback", auth_callback)
+    app.router.add_get("/auth/microsoft", microsoft_connect)
+    app.router.add_post("/whatsapp/webhook", whatsapp_webhook)
     app.router.add_post("/api/simulate-transcript", simulate_transcript)
     app.router.add_get("/api/debug/sessions", debug_sessions)
 
@@ -673,6 +1199,16 @@ def create_debug_app() -> web.Application:
     # Web UI API
     app.router.add_get("/api/web/status", web_status)
     app.router.add_get("/api/web/skills", web_skills)
+
+    # Chat history API
+    app.router.add_get("/api/chat/history", chat_history)
+
+    # Conversations API (multi-conversation support)
+    app.router.add_get("/api/conversations", list_conversations)
+    app.router.add_post("/api/conversations", create_conversation)
+    app.router.add_delete("/api/conversations/{id}", delete_conversation_endpoint)
+    app.router.add_post("/api/conversations/{id}/rename", rename_conversation_endpoint)
+    app.router.add_get("/api/conversations/{id}/history", conversation_history)
 
     # Admin dashboard routes
     setup_admin_routes(app)
@@ -703,6 +1239,53 @@ async def _session_cleanup_loop():
         except Exception as e:
             logger.warning(f"Session cleanup error: {e}")
         await asyncio.sleep(3600)  # Run every hour
+
+
+async def _daily_briefing_loop():
+    """Send daily briefing at 10 AM via WhatsApp."""
+    from datetime import datetime, timedelta
+    from app.services.briefing import generate_briefing
+
+    while True:
+        try:
+            now = datetime.now()
+            # Calculate seconds until next 10 AM
+            target = now.replace(hour=10, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            logger.info(f"Daily WhatsApp briefing scheduled in {wait_seconds/3600:.1f} hours")
+            await asyncio.sleep(wait_seconds)
+
+            # Generate briefing
+            briefing = await generate_briefing(
+                user_name="Anubhav",
+                user_id="daily-briefing",
+                ollama=ollama_client,
+                database=database,
+            )
+            if briefing and whatsapp_service.is_configured:
+                # Send to user's WhatsApp
+                user_phone = "+917205638079"
+                await whatsapp_service.send_message(user_phone, f"🌅 *MyAi Daily Briefing*\n\n{briefing}")
+                logger.info("Daily briefing sent via WhatsApp")
+
+                # Also push to web UI if connected
+                for client_id, client_ws in _ws_clients.items():
+                    if not client_ws.closed:
+                        try:
+                            await client_ws.send_json({
+                                "type": "response",
+                                "text": briefing,
+                                "source": "briefing",
+                            })
+                        except Exception:
+                            pass
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Daily briefing error: {e}")
+            await asyncio.sleep(3600)  # Retry in 1 hour
 
 
 async def _learning_engine_loop():
@@ -758,6 +1341,40 @@ async def run_async(web_only: bool = False):
     # Start background tasks
     asyncio.create_task(_session_cleanup_loop())
     asyncio.create_task(_learning_engine_loop())
+    asyncio.create_task(_daily_briefing_loop())
+
+    # Start reminder service
+    async def _reminder_notify(user_id: str, message: str):
+        """Send reminder notification via WebSocket + WhatsApp."""
+        logger.info(f"Reminder firing for user {user_id}: {message}")
+
+        # Send via WebSocket to ALL connected clients
+        for client_id, client_ws in _ws_clients.items():
+            if not client_ws.closed:
+                try:
+                    await client_ws.send_json({"type": "system", "text": message, "source": "reminder"})
+                    logger.info(f"Reminder sent to WebSocket for {client_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send reminder via WebSocket: {e}")
+
+        # Always send via WhatsApp if configured (so user gets phone notification)
+        if whatsapp_service.is_configured:
+            clean_msg = message.replace("**", "")
+            user_phone = "+917205638079"
+            try:
+                await whatsapp_service.send_message(user_phone, f"🔔 {clean_msg}")
+                logger.info(f"Reminder sent via WhatsApp to {user_phone}")
+            except Exception as e:
+                logger.warning(f"WhatsApp reminder failed: {e}")
+
+    reminder_service.set_notify_callback(_reminder_notify)
+    asyncio.create_task(reminder_service.check_loop())
+
+    # Start file watcher
+    try:
+        file_watcher.start()
+    except Exception as e:
+        logger.warning(f"File watcher failed to start: {e}")
 
     # Start HTTP server (Web UI + debug + WebSocket)
     debug_app = create_debug_app()

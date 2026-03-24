@@ -69,7 +69,7 @@ class GraphClient:
         }
         return (
             f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/authorize?"
-            + urlencode(params, quote_via=quote)
+            + urlencode(params)
         )
 
     async def exchange_code(self, code: str, slack_user_id: str) -> UserTokens:

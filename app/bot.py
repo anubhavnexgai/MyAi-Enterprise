@@ -166,6 +166,7 @@ class SlackBot:
                 "- `/status` -- Show current config and health\n"
                 "- `/skills` -- Show available enterprise AI agents\n"
                 "- `/clear` -- Clear conversation history\n"
+                "- `/admin` -- Open admin dashboard\n"
                 "- `/help` -- Show this message\n\n"
                 "*Profile & Context:*\n"
                 "- `/profile <info>` -- Set your profile (name, role, bio)\n"
@@ -483,11 +484,13 @@ class SlackBot:
         if self.graph_client.is_user_connected(user_id):
             email = self.graph_client.get_user_email(user_id)
             return f"You're already connected as *{email}*. Use `/disconnect` to sign out first."
-        auth_url = self.graph_client.get_auth_url(state=user_id)
+        # Use the redirect endpoint which handles OAuth URL generation server-side
+        from app.config import settings
+        connect_url = f"http://localhost:{settings.port}/auth/microsoft?token=__TOKEN__"
         return (
-            "*Connect to Microsoft 365*\n\n"
-            f"<{auth_url}|Click here to sign in with your Microsoft account>\n\n"
-            "After signing in, you'll be redirected back and your calendar, email, "
+            "**Connect to Microsoft 365**\n\n"
+            f"CONNECT_MICROSOFT\n\n"
+            "After signing in, you'll be redirected back and your email "
             "and files will be accessible through MyAi."
         )
 

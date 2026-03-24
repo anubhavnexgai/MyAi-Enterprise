@@ -85,7 +85,7 @@ class TavilyProvider(SearchProvider):
 
 class WebSearchService:
     def __init__(self):
-        self.enabled = False  # Off by default, user toggles with /search on
+        self.enabled = True  # On by default
         self._provider: SearchProvider | None = None
 
     @property

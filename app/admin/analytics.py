@@ -57,27 +57,27 @@ class AnalyticsService:
 
         try:
             async with aiosqlite.connect(self.db_path) as db:
-                # Total messages in period
-                if await self._table_exists(db, "messages"):
+                # Total messages in period (from usage_events for accuracy)
+                if await self._table_exists(db, "usage_events"):
                     cursor = await db.execute(
-                        "SELECT COUNT(*) FROM messages WHERE timestamp >= ?",
+                        "SELECT COUNT(*) FROM usage_events WHERE created_at >= ?",
                         (cutoff,),
                     )
                     row = await cursor.fetchone()
                     result["total_messages"] = row[0] if row else 0
 
                 # Total conversations in period
-                if await self._table_exists(db, "conversations"):
+                if await self._table_exists(db, "usage_events"):
                     cursor = await db.execute(
-                        "SELECT COUNT(*) FROM conversations WHERE created_at >= ?",
+                        "SELECT COUNT(DISTINCT user_id) FROM usage_events WHERE created_at >= ?",
                         (cutoff,),
                     )
                     row = await cursor.fetchone()
                     result["total_conversations"] = row[0] if row else 0
 
-                    # Active users (distinct user_ids from conversations in period)
+                    # Active users (distinct user_ids from usage_events in period)
                     cursor = await db.execute(
-                        "SELECT COUNT(DISTINCT user_id) FROM conversations WHERE updated_at >= ?",
+                        "SELECT COUNT(DISTINCT user_id) FROM usage_events WHERE created_at >= ?",
                         (cutoff,),
                     )
                     row = await cursor.fetchone()

@@ -229,11 +229,31 @@ async def prompt_versions(req: web.Request) -> web.Response:
 
 
 async def learning_page(req: web.Request) -> web.Response:
-    """Serve the learning dashboard HTML page."""
+    """Serve the learning dashboard HTML page with token injection."""
     html_path = Path(__file__).parent.parent.parent / "web" / "learning.html"
-    if html_path.exists():
-        return web.FileResponse(html_path)
-    return web.Response(text="Learning dashboard not found", status=404)
+    if not html_path.exists():
+        return web.Response(text="Learning dashboard not found", status=404)
+
+    html = html_path.read_text(encoding="utf-8")
+    token = req.query.get("token", "")
+    token_escaped = token.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+
+    token_script = f"""<script>
+(function(){{
+    var urlToken = '{token_escaped}';
+    var t = urlToken || localStorage.getItem("myai_auth_token") || localStorage.getItem("myai_token") || "";
+    if (t) {{
+        localStorage.setItem("myai_auth_token", t);
+        localStorage.setItem("myai_token", t);
+    }}
+    if (urlToken && window.history.replaceState) {{
+        window.history.replaceState(null, "", window.location.pathname);
+    }}
+}})();
+</script>"""
+
+    html = html.replace("</head>", token_script + "\n</head>")
+    return web.Response(text=html, content_type="text/html")
 
 
 def setup_learning_routes(app: web.Application) -> None:

@@ -1,14 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html class="dark" lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MyAi</title>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
     <div id="app">
-        <!-- Auth Screen (login / setup) -->
+
+        <!-- Auth Screen -->
         <div id="auth-screen" class="auth-screen">
             <div class="auth-container">
                 <div class="auth-logo">
@@ -16,7 +19,7 @@
                     <p class="auth-subtitle">Enterprise AI Assistant</p>
                 </div>
 
-                <!-- Setup Form (first-time super admin creation) -->
+                <!-- Setup Form -->
                 <form id="setup-form" class="auth-form hidden">
                     <h2>Create Super Admin</h2>
                     <p class="auth-desc">No administrator found. Create the first super admin account to get started.</p>
@@ -67,83 +70,149 @@
 
         <!-- Sidebar -->
         <aside id="sidebar" class="hidden">
-            <div class="sidebar-header">
-                <h1>MyAi</h1>
-                <span class="version">v0.3.0</span>
+            <!-- Brand Header -->
+            <div class="sidebar-brand">
+                <h1 class="brand-title">MyAi</h1>
+                <p class="brand-subtitle">Enterprise Assistant</p>
             </div>
 
-            <div id="user-panel" class="panel">
-                <div class="user-info">
-                    <span id="user-display-name" class="user-name">User</span>
-                    <span id="user-role-badge" class="user-role-badge">employee</span>
+            <!-- Primary Navigation -->
+            <nav class="sidebar-nav">
+                <button id="btn-new-chat" class="nav-btn nav-btn-active">
+                    <span class="material-symbols-outlined nav-icon">add_comment</span>
+                    <span class="nav-label">New Chat</span>
+                </button>
+                <a href="#" id="link-admin-dashboard" class="nav-btn hidden">
+                    <span class="material-symbols-outlined nav-icon">dashboard</span>
+                    <span class="nav-label">Dashboard</span>
+                </a>
+            </nav>
+
+            <!-- Recent Chats -->
+            <div class="sidebar-section">
+                <span class="section-label">Recent Chats</span>
+                <div id="recent-chats" class="recent-chats-list">
+                    <!-- populated dynamically or left empty -->
                 </div>
             </div>
 
-            <div id="status-panel" class="panel">
-                <h3>Status</h3>
-                <div class="status-row">
-                    <span class="status-label">Ollama</span>
-                    <span id="status-ollama" class="status-badge offline">--</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-label">Model</span>
-                    <span id="status-model" class="status-value">--</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-label">Microsoft 365</span>
-                    <span id="status-graph" class="status-badge offline">--</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-label">Web Search</span>
-                    <div class="toggle-group">
-                        <span id="status-search" class="status-value">Off</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" id="search-toggle">
-                            <span class="toggle-slider"></span>
-                        </label>
+            <!-- Skills Panel -->
+            <div id="skills-panel" class="sidebar-section">
+                <span class="section-label">Enterprise Skills</span>
+                <div id="skills-list" class="skills-list"></div>
+            </div>
+
+            <!-- Footer Navigation -->
+            <div class="sidebar-footer">
+                <button id="btn-settings" class="footer-btn">
+                    <span class="material-symbols-outlined footer-icon">settings</span>
+                    <span class="footer-label">Settings</span>
+                </button>
+                <button id="btn-status-toggle" class="footer-btn">
+                    <span class="material-symbols-outlined footer-icon">sensors</span>
+                    <span class="footer-label">Status</span>
+                </button>
+
+                <!-- Status Panel (toggled) -->
+                <div id="status-panel" class="status-panel hidden">
+                    <div class="status-row">
+                        <span class="status-label">Ollama</span>
+                        <span id="status-ollama" class="status-badge offline">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">Model</span>
+                        <span id="status-model" class="status-value">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">Microsoft 365</span>
+                        <span id="status-graph" class="status-badge offline">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">Web Search</span>
+                        <div class="toggle-group">
+                            <span id="status-search" class="status-value">Off</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="search-toggle">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <div id="skills-panel" class="panel">
-                <h3>Enterprise Skills</h3>
-                <div id="skills-list"></div>
-            </div>
-
-            <div class="sidebar-footer">
-                <button id="btn-clear" class="sidebar-btn" title="Clear conversation">Clear Chat</button>
-                <button id="btn-logout" class="sidebar-btn sidebar-btn-danger" title="Logout">Logout</button>
+                <!-- User Profile -->
+                <div class="sidebar-user">
+                    <div class="user-avatar">
+                        <span class="material-symbols-outlined">person</span>
+                    </div>
+                    <div class="user-meta">
+                        <p id="user-display-name" class="user-name">User</p>
+                        <p id="user-role-badge" class="user-role-badge">employee</p>
+                    </div>
+                    <button id="btn-logout" class="logout-btn" title="Logout">
+                        <span class="material-symbols-outlined">logout</span>
+                    </button>
+                </div>
             </div>
         </aside>
 
-        <!-- Main Chat -->
+        <!-- Main Chat Area -->
         <main id="chat-area" class="hidden">
-            <div id="chat-header">
-                <button id="btn-toggle-sidebar" class="icon-btn" title="Toggle sidebar">&#9776;</button>
-                <div class="header-info">
-                    <h2>Chat</h2>
-                    <span id="connection-status" class="conn-badge disconnected">Disconnected</span>
+            <!-- Top Bar -->
+            <header id="chat-header">
+                <div class="header-left">
+                    <button id="btn-toggle-sidebar" class="icon-btn" title="Toggle sidebar">
+                        <span class="material-symbols-outlined">menu</span>
+                    </button>
+                    <div class="header-status">
+                        <span id="conn-dot" class="conn-dot disconnected"></span>
+                        <span id="connection-status" class="conn-label">Disconnected</span>
+                    </div>
+                    <div class="header-divider"></div>
+                    <span class="header-section-label">Chat</span>
                 </div>
-            </div>
+                <div class="header-right">
+                    <div id="model-pill" class="model-pill">
+                        <span id="model-pill-name" class="model-pill-text">--</span>
+                    </div>
+                    <div id="ms365-pill" class="ms365-pill">
+                        <span class="material-symbols-outlined ms365-icon">cloud</span>
+                        <span id="ms365-status-text" class="ms365-text">M365</span>
+                    </div>
+                </div>
+            </header>
 
+            <!-- Messages -->
             <div id="messages"></div>
 
+            <!-- Typing Indicator -->
             <div id="typing-indicator" class="hidden">
-                <div class="typing-dots">
-                    <span></span><span></span><span></span>
+                <div class="typing-wrapper">
+                    <div class="typing-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                    <span class="typing-text">MyAi is thinking...</span>
                 </div>
-                <span class="typing-text">MyAi is thinking...</span>
             </div>
 
-            <form id="chat-form">
-                <div class="input-row">
-                    <textarea id="chat-input" placeholder="Ask MyAi anything... (Shift+Enter for new line)" rows="1" autofocus></textarea>
-                    <button type="button" id="btn-send" disabled>Send</button>
-                </div>
-                <div class="input-hints">
-                    <span>Try: <code>/help</code> <code>/status</code> <code>/skills</code> <code>/connect</code> <code>/calendar</code></span>
-                </div>
-            </form>
+            <!-- Input Bar -->
+            <div class="input-area">
+                <form id="chat-form">
+                    <div class="input-bar-wrapper">
+                        <div class="input-glow"></div>
+                        <div class="input-bar">
+                            <textarea id="chat-input" placeholder="Ask MyAi anything..." rows="1" autofocus></textarea>
+                            <div class="input-actions">
+                                <button type="button" id="btn-send" disabled title="Send message">
+                                    <span class="material-symbols-outlined">send</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="input-hints">
+                        <span>Try: <code>/help</code> <code>/status</code> <code>/skills</code> <code>/admin</code> <code>/remind</code></span>
+                    </div>
+                </form>
+            </div>
         </main>
 
         <!-- Settings Modal -->
@@ -151,7 +220,9 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h2>Settings</h2>
-                    <button class="modal-close" id="btn-close-settings">&times;</button>
+                    <button class="modal-close" id="btn-close-settings">
+                        <span class="material-symbols-outlined">close</span>
+                    </button>
                 </div>
                 <div class="modal-body">
                     <div class="setting-group">

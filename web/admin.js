@@ -1,8 +1,9 @@
 /**
- * MyAi Super Admin Dashboard JavaScript
+ * MyAi Admin Dashboard JavaScript — Obsidian Dark Theme
  *
- * Handles data fetching, rendering, tab switching, and auto-refresh
- * for the admin dashboard. No external dependencies.
+ * Handles data fetching, rendering, tab switching, auto-refresh,
+ * and the Learning Loop tab (feedback, refinements, prompt versions).
+ * No external dependencies.
  */
 
 (function () {
@@ -10,14 +11,14 @@
 
     // ── Configuration ──
 
-    var REFRESH_INTERVAL_MS = 60000; // Auto-refresh every 60 seconds
+    var REFRESH_INTERVAL_MS = 60000;
     var refreshTimer = null;
     var currentTab = "overview";
 
     // ── Auth Helpers ──
 
     function getToken() {
-        return localStorage.getItem("myai_token") || "";
+        return localStorage.getItem("myai_auth_token") || localStorage.getItem("myai_token") || "";
     }
 
     function getUserInfo() {
@@ -50,8 +51,10 @@
             }
             if (resp.status === 403) {
                 document.body.innerHTML =
-                    '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#f87171;font-size:18px;">' +
-                    'Access Denied: Admin privileges required. <a href="/" style="color:#6c63ff;margin-left:12px;">Return to Chat</a></div>';
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100vh;' +
+                    'font-family:Inter,sans-serif;color:#ff6e84;font-size:18px;background:#060e20;">' +
+                    'Access Denied: Admin privileges required. ' +
+                    '<a href="/" style="color:#9fa7ff;margin-left:12px;">Return to Chat</a></div>';
                 return Promise.reject(new Error("Forbidden"));
             }
             return resp.json();
@@ -80,6 +83,22 @@
         });
     }
 
+    // ── Toast ──
+
+    function showToast(message, isError) {
+        var existing = document.querySelector(".toast");
+        if (existing) existing.remove();
+
+        var toast = document.createElement("div");
+        toast.className = "toast " + (isError ? "toast-error" : "toast-success");
+        toast.textContent = message;
+        document.body.appendChild(toast);
+
+        setTimeout(function () {
+            if (toast.parentNode) toast.remove();
+        }, 4000);
+    }
+
     // ── Initialization ──
 
     function init() {
@@ -91,8 +110,12 @@
 
         var userInfo = getUserInfo();
         var userEl = document.getElementById("user-info");
-        if (userInfo && userEl) {
-            userEl.textContent = (userInfo.display_name || userInfo.email || "Admin");
+        if (userEl) {
+            if (userInfo) {
+                userEl.textContent = (userInfo.display_name || userInfo.email || "Admin");
+            } else {
+                userEl.textContent = "Admin";
+            }
         }
 
         loadCurrentTab();
@@ -100,6 +123,7 @@
     }
 
     window.logout = function () {
+        localStorage.removeItem("myai_auth_token");
         localStorage.removeItem("myai_token");
         localStorage.removeItem("myai_user");
         window.location.href = "/";
@@ -110,7 +134,6 @@
     window.switchTab = function (tabName) {
         currentTab = tabName;
 
-        // Update tab buttons
         var buttons = document.querySelectorAll(".tab-btn");
         for (var i = 0; i < buttons.length; i++) {
             if (buttons[i].getAttribute("data-tab") === tabName) {
@@ -120,7 +143,6 @@
             }
         }
 
-        // Update tab panels
         var panels = document.querySelectorAll(".tab-panel");
         for (var j = 0; j < panels.length; j++) {
             if (panels[j].id === "panel-" + tabName) {
@@ -138,17 +160,11 @@
             case "overview":
                 loadOverview();
                 break;
-            case "skills":
-                loadSkillMetrics();
-                break;
             case "users":
                 loadUsers();
                 break;
-            case "datasources":
-                loadDataSources();
-                break;
-            case "errors":
-                loadErrors();
+            case "learning":
+                loadLearning();
                 break;
             case "system":
                 loadSystemHealth();
@@ -166,7 +182,7 @@
     // ── Overview Tab ──
 
     function loadOverview() {
-        fetchWithAuth("/api/admin/analytics/overview?period_hours=24")
+        fetchWithAuth("/api/admin/analytics/overview?period_hours=8760")
             .then(function (data) {
                 setText("metric-messages", formatNumber(data.total_messages));
                 setText("metric-active-users", formatNumber(data.active_users));
@@ -178,14 +194,12 @@
             })
             .catch(function () {});
 
-        // Load volume chart
         fetchWithAuth("/api/admin/analytics/volume?period_hours=168&bucket=hourly")
             .then(function (data) {
                 renderVolumeChart(data.volume || []);
             })
             .catch(function () {});
 
-        // Load response time distribution
         fetchWithAuth("/api/admin/analytics/response-times?period_hours=168")
             .then(function (data) {
                 renderResponseTimes(data);
@@ -228,7 +242,7 @@
         if (!container) return;
 
         if (!data || data.length === 0) {
-            container.innerHTML = '<div class="empty-state"><p>No volume data available yet.</p></div>';
+            container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">bar_chart</span><p>No volume data available yet.</p></div>';
             return;
         }
 
@@ -252,79 +266,44 @@
         for (var g = 0; g <= 4; g++) {
             var yLine = padding.top + chartHeight - (chartHeight * g / 4);
             var yLabel = Math.round(maxVal * g / 4);
-            svg += '<line x1="' + padding.left + '" y1="' + yLine + '" x2="' + (width - padding.right) + '" y2="' + yLine + '" stroke="#2d2d2d" stroke-width="1"/>';
-            svg += '<text x="' + (padding.left - 4) + '" y="' + (yLine + 3) + '" text-anchor="end" fill="#666" font-size="9" font-family="monospace">' + yLabel + '</text>';
+            svg += '<line x1="' + padding.left + '" y1="' + yLine + '" x2="' + (width - padding.right) + '" y2="' + yLine + '" stroke="rgba(64,72,93,0.3)" stroke-width="1"/>';
+            svg += '<text x="' + (padding.left - 4) + '" y="' + (yLine + 3) + '" text-anchor="end" fill="#6d758c" font-size="9" font-family="Inter, sans-serif">' + yLabel + '</text>';
         }
 
-        // Bars
+        // Bars with gradient effect
+        svg += '<defs><linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">' +
+            '<stop offset="0%" stop-color="#9fa7ff" stop-opacity="0.9"/>' +
+            '<stop offset="100%" stop-color="#9fa7ff" stop-opacity="0.3"/>' +
+            '</linearGradient></defs>';
+
         for (var b = 0; b < data.length; b++) {
             var barHeight = (data[b].message_count / maxVal) * chartHeight;
             var x = padding.left + (b * (chartWidth / data.length));
             var y = padding.top + chartHeight - barHeight;
-            svg += '<rect x="' + x + '" y="' + y + '" width="' + barWidth + '" height="' + barHeight + '" fill="#6c63ff" opacity="0.8" rx="1">';
+            svg += '<rect x="' + x + '" y="' + y + '" width="' + barWidth + '" height="' + barHeight + '" fill="url(#barGrad)" rx="2">';
             svg += '<title>' + (data[b].bucket_time || "") + ': ' + data[b].message_count + ' messages</title>';
             svg += '</rect>';
         }
 
-        // X-axis labels (show a few evenly spaced)
+        // X-axis labels
         var labelCount = Math.min(7, data.length);
         var labelStep = Math.max(1, Math.floor(data.length / labelCount));
         for (var l = 0; l < data.length; l += labelStep) {
             var labelX = padding.left + (l * (chartWidth / data.length)) + barWidth / 2;
             var labelText = data[l].bucket_time || "";
-            // Shorten label
             if (labelText.length > 10) {
                 labelText = labelText.substring(5, 10);
             }
-            svg += '<text x="' + labelX + '" y="' + (height - 5) + '" text-anchor="middle" fill="#666" font-size="9" font-family="monospace">' + labelText + '</text>';
+            svg += '<text x="' + labelX + '" y="' + (height - 5) + '" text-anchor="middle" fill="#6d758c" font-size="9" font-family="Inter, sans-serif">' + labelText + '</text>';
         }
 
         svg += '</svg>';
         container.innerHTML = svg;
     }
 
-    // ── Skills Tab ──
-
-    function loadSkillMetrics() {
-        fetchWithAuth("/api/admin/analytics/skills?period_hours=168")
-            .then(function (data) {
-                var skills = data.skills || [];
-                var tbody = document.getElementById("skills-tbody");
-                if (!tbody) return;
-
-                if (skills.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" class="muted" style="text-align:center;padding:32px;">No skill execution data yet.</td></tr>';
-                    return;
-                }
-
-                var html = "";
-                for (var i = 0; i < skills.length; i++) {
-                    var s = skills[i];
-                    var successBadge = s.success_rate >= 95
-                        ? "badge-success"
-                        : s.success_rate >= 80
-                            ? "badge-warning"
-                            : "badge-error";
-
-                    html += "<tr>" +
-                        "<td><strong>" + escapeHtml(s.skill_name) + "</strong></td>" +
-                        '<td class="mono">' + s.execution_count + "</td>" +
-                        '<td class="mono">' + (s.avg_confidence || 0).toFixed(2) + "</td>" +
-                        '<td class="mono">' + formatNumber(s.avg_response_time_ms) + "</td>" +
-                        '<td><span class="badge ' + successBadge + '">' + s.success_rate + "%</span></td>" +
-                        '<td class="mono" style="color:var(--success);">' + s.thumbs_up + "</td>" +
-                        '<td class="mono" style="color:var(--error);">' + s.thumbs_down + "</td>" +
-                        "</tr>";
-                }
-                tbody.innerHTML = html;
-            })
-            .catch(function () {});
-    }
-
     // ── Users Tab ──
 
     function loadUsers() {
-        // Load both user list and activity data
         var usersPromise = fetchWithAuth("/api/admin/users");
         var activityPromise = fetchWithAuth("/api/admin/analytics/users?period_hours=168&limit=100");
 
@@ -333,7 +312,6 @@
                 var userList = (results[0] && results[0].users) || [];
                 var activityList = (results[1] && results[1].users) || [];
 
-                // Create activity lookup by user_id
                 var activityMap = {};
                 for (var a = 0; a < activityList.length; a++) {
                     activityMap[activityList[a].user_id] = activityList[a];
@@ -343,7 +321,7 @@
                 if (!tbody) return;
 
                 if (userList.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" class="muted" style="text-align:center;padding:32px;">No users registered yet.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7" class="muted center-cell">No users registered yet.</td></tr>';
                     return;
                 }
 
@@ -400,11 +378,13 @@
             role_level: newRole,
         }).then(function (data) {
             if (data.error) {
-                alert("Error: " + data.error);
+                showToast("Error: " + data.error, true);
+            } else {
+                showToast("Role updated successfully", false);
             }
             loadUsers();
         }).catch(function (err) {
-            alert("Failed to update role: " + err.message);
+            showToast("Failed to update role: " + err.message, true);
         });
     };
 
@@ -413,76 +393,260 @@
         var url = "/api/admin/users/" + encodeURIComponent(userId) + "/" + action;
         fetchWithAuthBody(url, "POST", {}).then(function (data) {
             if (data.error) {
-                alert("Error: " + data.error);
+                showToast("Error: " + data.error, true);
+            } else {
+                showToast("User " + action + "d successfully", false);
             }
             loadUsers();
         }).catch(function (err) {
-            alert("Failed to " + action + " user: " + err.message);
+            showToast("Failed to " + action + " user: " + err.message, true);
         });
     };
 
-    // ── Data Sources Tab ──
+    // ── Learning Tab ──
 
-    var SOURCE_TYPE_LABELS = {
-        "local_directory": "Local Directory",
-        "sql_database": "SQL Database",
-        "sharepoint": "SharePoint",
-        "rest_api": "REST API",
-    };
-
-    var ROLE_LABELS = {
-        "employee": "Employee",
-        "manager": "Manager",
-        "admin": "Admin",
-        "super_admin": "Super Admin",
-    };
-
-    function statusBadgeClass(status) {
-        switch (status) {
-            case "ready": return "badge-success";
-            case "indexing": return "badge-info";
-            case "error": return "badge-error";
-            case "pending":
-            default: return "badge-muted";
-        }
+    function loadLearning() {
+        loadFeedbackStats();
+        loadSatisfactionTrend();
+        loadPendingEntries();
+        loadApprovalHistory();
+        loadPromptVersions();
     }
 
-    function loadDataSources() {
-        fetchWithAuth("/api/admin/datasources")
+    function loadFeedbackStats() {
+        fetchWithAuth("/api/feedback/stats?period_hours=720")
             .then(function (data) {
-                var sources = data.datasources || [];
-                var tbody = document.getElementById("datasources-tbody");
-                if (!tbody) return;
+                var up = data.thumbs_up || 0;
+                var down = data.thumbs_down || 0;
+                var total = up + down;
+                var satisfaction = total > 0 ? Math.round((up / total) * 100) : 0;
 
-                if (sources.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" class="muted" style="text-align:center;padding:32px;">No data sources configured yet. Click "Add Data Source" to get started.</td></tr>';
+                setText("learning-thumbs-up", formatNumber(up));
+                setText("learning-thumbs-down", formatNumber(down));
+                setText("learning-satisfaction", satisfaction + "%");
+            })
+            .catch(function () {});
+
+        fetchWithAuth("/api/admin/learning/pending")
+            .then(function (data) {
+                var entries = data.entries || [];
+                setText("learning-pending-count", String(entries.length));
+            })
+            .catch(function () {
+                setText("learning-pending-count", "0");
+            });
+    }
+
+    function loadSatisfactionTrend() {
+        fetchWithAuth("/api/admin/learning/satisfaction-trend?days=30")
+            .then(function (data) {
+                renderSatisfactionChart(data.trend || []);
+            })
+            .catch(function () {
+                var container = document.getElementById("satisfaction-chart");
+                if (container) {
+                    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">trending_up</span><p>No trend data available yet.</p></div>';
+                }
+            });
+    }
+
+    function renderSatisfactionChart(data) {
+        var container = document.getElementById("satisfaction-chart");
+        if (!container) return;
+
+        if (!data || data.length === 0) {
+            container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">trending_up</span><p>No satisfaction trend data yet. Feedback will appear here.</p></div>';
+            return;
+        }
+
+        var width = container.clientWidth || 800;
+        var height = 180;
+        var padding = { top: 10, right: 10, bottom: 30, left: 40 };
+        var chartWidth = width - padding.left - padding.right;
+        var chartHeight = height - padding.top - padding.bottom;
+
+        // Find max for scaling (satisfaction is 0-100)
+        var maxVal = 100;
+
+        var svg = '<svg class="chart-svg" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMidYMid meet">';
+
+        // Y-axis gridlines
+        for (var g = 0; g <= 4; g++) {
+            var yLine = padding.top + chartHeight - (chartHeight * g / 4);
+            var yLabel = Math.round(maxVal * g / 4) + "%";
+            svg += '<line x1="' + padding.left + '" y1="' + yLine + '" x2="' + (width - padding.right) + '" y2="' + yLine + '" stroke="rgba(64,72,93,0.3)" stroke-width="1"/>';
+            svg += '<text x="' + (padding.left - 4) + '" y="' + (yLine + 3) + '" text-anchor="end" fill="#6d758c" font-size="9" font-family="Inter, sans-serif">' + yLabel + '</text>';
+        }
+
+        // Build line path
+        var points = [];
+        for (var i = 0; i < data.length; i++) {
+            var satisfaction = data[i].satisfaction_rate || 0;
+            var px = padding.left + (i / Math.max(1, data.length - 1)) * chartWidth;
+            var py = padding.top + chartHeight - (satisfaction / maxVal) * chartHeight;
+            points.push(px + "," + py);
+        }
+
+        if (points.length > 1) {
+            // Area fill
+            var areaPath = "M" + points[0];
+            for (var a = 1; a < points.length; a++) {
+                areaPath += " L" + points[a];
+            }
+            var lastX = padding.left + ((data.length - 1) / Math.max(1, data.length - 1)) * chartWidth;
+            var baseY = padding.top + chartHeight;
+            areaPath += " L" + lastX + "," + baseY + " L" + padding.left + "," + baseY + " Z";
+
+            svg += '<defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">' +
+                '<stop offset="0%" stop-color="#9bffce" stop-opacity="0.2"/>' +
+                '<stop offset="100%" stop-color="#9bffce" stop-opacity="0.02"/>' +
+                '</linearGradient></defs>';
+            svg += '<path d="' + areaPath + '" fill="url(#areaGrad)"/>';
+
+            // Line
+            var linePath = "M" + points.join(" L");
+            svg += '<path d="' + linePath + '" fill="none" stroke="#9bffce" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+        }
+
+        // Data points
+        for (var d = 0; d < data.length; d++) {
+            var sat = data[d].satisfaction_rate || 0;
+            var dotX = padding.left + (d / Math.max(1, data.length - 1)) * chartWidth;
+            var dotY = padding.top + chartHeight - (sat / maxVal) * chartHeight;
+            svg += '<circle cx="' + dotX + '" cy="' + dotY + '" r="3" fill="#9bffce" stroke="#060e20" stroke-width="1.5">';
+            svg += '<title>' + (data[d].date || "") + ': ' + sat.toFixed(1) + '%</title>';
+            svg += '</circle>';
+        }
+
+        // X-axis labels
+        var labelCount = Math.min(7, data.length);
+        var labelStep = Math.max(1, Math.floor(data.length / labelCount));
+        for (var l = 0; l < data.length; l += labelStep) {
+            var lx = padding.left + (l / Math.max(1, data.length - 1)) * chartWidth;
+            var dateLabel = data[l].date || "";
+            if (dateLabel.length > 10) dateLabel = dateLabel.substring(5, 10);
+            svg += '<text x="' + lx + '" y="' + (height - 5) + '" text-anchor="middle" fill="#6d758c" font-size="9" font-family="Inter, sans-serif">' + dateLabel + '</text>';
+        }
+
+        svg += '</svg>';
+        container.innerHTML = svg;
+    }
+
+    function loadPendingEntries() {
+        fetchWithAuth("/api/admin/learning/pending")
+            .then(function (data) {
+                var entries = data.entries || [];
+                var container = document.getElementById("pending-entries");
+                if (!container) return;
+
+                if (entries.length === 0) {
+                    container.innerHTML = '<div class="empty-state"><span class="material-symbols-outlined">check_circle</span><p>No pending refinements. All caught up!</p></div>';
                     return;
                 }
 
                 var html = "";
-                for (var i = 0; i < sources.length; i++) {
-                    var s = sources[i];
-                    var typeLabel = SOURCE_TYPE_LABELS[s.source_type] || s.source_type;
-                    var roleLabel = ROLE_LABELS[s.min_role_level] || s.min_role_level;
-                    var badgeClass = statusBadgeClass(s.status);
-                    var lastIndexed = s.last_indexed_at ? formatTimestamp(s.last_indexed_at) : "Never";
-                    var sid = escapeAttr(s.id);
+                for (var i = 0; i < entries.length; i++) {
+                    var e = entries[i];
+                    var typeLabel = (e.entry_type || "unknown").replace(/_/g, " ");
+                    var created = formatTimestamp(e.created_at);
+
+                    html += '<div class="entry-card">';
+                    html += '<div class="entry-header">';
+                    html += '<span class="entry-type">' + escapeHtml(typeLabel) + '</span>';
+                    html += '<span class="entry-meta">Created ' + created + '</span>';
+                    html += '</div>';
+
+                    if (e.trigger_feedback) {
+                        html += '<div class="entry-trigger"><strong>Trigger</strong>' + escapeHtml(e.trigger_feedback) + '</div>';
+                    }
+
+                    if (e.suggested_improvement) {
+                        html += '<div class="entry-improvement"><strong>Suggested Improvement</strong>' + escapeHtml(e.suggested_improvement) + '</div>';
+                    }
+
+                    html += '<div class="entry-actions">';
+                    html += '<button class="btn-action btn-primary" onclick="approveEntry(\'' + escapeAttr(e.id) + '\')">Approve</button>';
+                    html += '<button class="btn-action danger" onclick="rejectEntry(\'' + escapeAttr(e.id) + '\')">Reject</button>';
+                    html += '</div>';
+                    html += '</div>';
+                }
+
+                container.innerHTML = html;
+            })
+            .catch(function () {});
+    }
+
+    window.approveEntry = function (entryId) {
+        fetchWithAuthBody("/api/admin/learning/" + encodeURIComponent(entryId) + "/approve", "POST", {})
+            .then(function (data) {
+                if (data.error) {
+                    showToast("Error: " + data.error, true);
+                } else {
+                    showToast("Entry approved and applied", false);
+                    loadLearning();
+                }
+            })
+            .catch(function (err) {
+                showToast("Failed to approve: " + err.message, true);
+            });
+    };
+
+    window.rejectEntry = function (entryId) {
+        fetchWithAuthBody("/api/admin/learning/" + encodeURIComponent(entryId) + "/reject", "POST", {})
+            .then(function (data) {
+                if (data.error) {
+                    showToast("Error: " + data.error, true);
+                } else {
+                    showToast("Entry rejected", false);
+                    loadLearning();
+                }
+            })
+            .catch(function (err) {
+                showToast("Failed to reject: " + err.message, true);
+            });
+    };
+
+    function loadApprovalHistory() {
+        fetchWithAuth("/api/admin/learning/history?limit=50")
+            .then(function (data) {
+                var entries = data.entries || [];
+                var tbody = document.getElementById("history-tbody");
+                if (!tbody) return;
+
+                // Filter to only show approved/rejected entries
+                var reviewed = [];
+                for (var i = 0; i < entries.length; i++) {
+                    if (entries[i].status === "approved" || entries[i].status === "rejected") {
+                        reviewed.push(entries[i]);
+                    }
+                }
+
+                if (reviewed.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="muted center-cell">No approval history yet.</td></tr>';
+                    return;
+                }
+
+                var html = "";
+                for (var j = 0; j < reviewed.length; j++) {
+                    var e = reviewed[j];
+                    var typeLabel = (e.entry_type || "unknown").replace(/_/g, " ");
+                    var statusClass = e.status === "approved" ? "badge-approved" : "badge-rejected";
+                    var trigger = e.trigger_feedback || "--";
+                    var improvement = e.suggested_improvement || "--";
+                    var reviewer = e.reviewed_by || "--";
+                    var reviewedAt = formatTimestamp(e.reviewed_at);
+
+                    // Truncate long text
+                    if (trigger.length > 80) trigger = trigger.substring(0, 80) + "...";
+                    if (improvement.length > 80) improvement = improvement.substring(0, 80) + "...";
 
                     html += "<tr>" +
-                        "<td><strong>" + escapeHtml(s.name) + "</strong></td>" +
                         "<td>" + escapeHtml(typeLabel) + "</td>" +
-                        '<td><span class="badge ' + badgeClass + '">' + escapeHtml(s.status) + "</span></td>" +
-                        '<td class="mono">' + (s.document_count || 0) + "</td>" +
-                        "<td>" + escapeHtml(roleLabel) + "</td>" +
-                        '<td class="muted">' + lastIndexed + "</td>" +
-                        "<td>" +
-                        '<div class="ds-action-group">' +
-                        '<button class="btn-action" onclick="testDataSource(\'' + sid + '\')">Test</button>' +
-                        '<button class="btn-action btn-primary-sm" onclick="triggerIndexing(\'' + sid + '\')">Re-index</button>' +
-                        '<button class="btn-action" onclick="showEditDataSourceForm(\'' + sid + '\')">Edit</button>' +
-                        '<button class="btn-action danger" onclick="deleteDataSource(\'' + sid + '\')">Delete</button>' +
-                        '</div>' +
-                        "</td>" +
+                        '<td><span class="badge ' + statusClass + '">' + escapeHtml(e.status) + "</span></td>" +
+                        '<td class="muted" title="' + escapeAttr(e.trigger_feedback || "") + '">' + escapeHtml(trigger) + "</td>" +
+                        '<td title="' + escapeAttr(e.suggested_improvement || "") + '">' + escapeHtml(improvement) + "</td>" +
+                        '<td class="muted">' + escapeHtml(reviewer) + "</td>" +
+                        '<td class="muted">' + reviewedAt + "</td>" +
                         "</tr>";
                 }
                 tbody.innerHTML = html;
@@ -490,271 +654,37 @@
             .catch(function () {});
     }
 
-    function showDsToast(message, isError) {
-        var toast = document.getElementById("ds-toast");
-        if (!toast) return;
-        toast.textContent = message;
-        toast.className = "ds-toast" + (isError ? " ds-toast-error" : " ds-toast-success");
-        setTimeout(function () {
-            toast.className = "ds-toast hidden";
-        }, 4000);
-    }
-
-    window.showAddDataSourceForm = function () {
-        document.getElementById("ds-modal-title").textContent = "Add Data Source";
-        document.getElementById("ds-edit-id").value = "";
-        document.getElementById("ds-name").value = "";
-        document.getElementById("ds-type").value = "local_directory";
-        document.getElementById("ds-min-role").value = "employee";
-        clearDsConfigFields();
-        onDsTypeChange();
-        document.getElementById("ds-modal").classList.remove("hidden");
-    };
-
-    window.showEditDataSourceForm = function (id) {
-        fetchWithAuth("/api/admin/datasources/" + encodeURIComponent(id))
+    function loadPromptVersions() {
+        fetchWithAuth("/api/admin/learning/prompt-versions")
             .then(function (data) {
-                var ds = data.datasource;
-                if (!ds) return;
-
-                document.getElementById("ds-modal-title").textContent = "Edit Data Source";
-                document.getElementById("ds-edit-id").value = ds.id;
-                document.getElementById("ds-name").value = ds.name || "";
-                document.getElementById("ds-type").value = ds.source_type || "local_directory";
-                document.getElementById("ds-min-role").value = ds.min_role_level || "employee";
-
-                clearDsConfigFields();
-                onDsTypeChange();
-
-                // Populate config fields
-                var config = ds.config || {};
-                populateDsConfigFields(ds.source_type, config);
-
-                document.getElementById("ds-modal").classList.remove("hidden");
-            })
-            .catch(function (err) {
-                alert("Failed to load data source: " + err.message);
-            });
-    };
-
-    window.closeDsModal = function () {
-        document.getElementById("ds-modal").classList.add("hidden");
-    };
-
-    window.onDsTypeChange = function () {
-        var type = document.getElementById("ds-type").value;
-        var sections = document.querySelectorAll(".ds-config-section");
-        for (var i = 0; i < sections.length; i++) {
-            if (sections[i].id === "ds-config-" + type) {
-                sections[i].classList.remove("hidden");
-            } else {
-                sections[i].classList.add("hidden");
-            }
-        }
-    };
-
-    function clearDsConfigFields() {
-        var fields = [
-            "ds-cfg-directory_path",
-            "ds-cfg-connection_string", "ds-cfg-query",
-            "ds-cfg-client_id", "ds-cfg-client_secret", "ds-cfg-tenant_id", "ds-cfg-site_id", "ds-cfg-folder_path",
-            "ds-cfg-base_url", "ds-cfg-auth_config", "ds-cfg-endpoints", "ds-cfg-response_text_field",
-        ];
-        for (var i = 0; i < fields.length; i++) {
-            var el = document.getElementById(fields[i]);
-            if (el) el.value = "";
-        }
-        var authTypeEl = document.getElementById("ds-cfg-auth_type");
-        if (authTypeEl) authTypeEl.value = "api_key";
-    }
-
-    function populateDsConfigFields(sourceType, config) {
-        if (sourceType === "local_directory") {
-            setVal("ds-cfg-directory_path", config.directory_path);
-        } else if (sourceType === "sql_database") {
-            setVal("ds-cfg-connection_string", config.connection_string);
-            setVal("ds-cfg-query", config.query);
-        } else if (sourceType === "sharepoint") {
-            setVal("ds-cfg-client_id", config.client_id);
-            setVal("ds-cfg-client_secret", config.client_secret);
-            setVal("ds-cfg-tenant_id", config.tenant_id);
-            setVal("ds-cfg-site_id", config.site_id);
-            setVal("ds-cfg-folder_path", config.folder_path);
-        } else if (sourceType === "rest_api") {
-            setVal("ds-cfg-base_url", config.base_url);
-            setVal("ds-cfg-auth_type", config.auth_type || "api_key");
-            setVal("ds-cfg-auth_config", config.auth_config ? JSON.stringify(config.auth_config, null, 2) : "");
-            setVal("ds-cfg-endpoints", Array.isArray(config.endpoints) ? config.endpoints.join("\n") : "");
-            setVal("ds-cfg-response_text_field", config.response_text_field);
-        }
-    }
-
-    function setVal(id, value) {
-        var el = document.getElementById(id);
-        if (el && value !== undefined && value !== null) el.value = value;
-    }
-
-    function buildConfigFromForm(sourceType) {
-        var config = {};
-        if (sourceType === "local_directory") {
-            config.directory_path = document.getElementById("ds-cfg-directory_path").value.trim();
-        } else if (sourceType === "sql_database") {
-            config.connection_string = document.getElementById("ds-cfg-connection_string").value.trim();
-            config.query = document.getElementById("ds-cfg-query").value.trim();
-        } else if (sourceType === "sharepoint") {
-            config.client_id = document.getElementById("ds-cfg-client_id").value.trim();
-            config.client_secret = document.getElementById("ds-cfg-client_secret").value.trim();
-            config.tenant_id = document.getElementById("ds-cfg-tenant_id").value.trim();
-            config.site_id = document.getElementById("ds-cfg-site_id").value.trim();
-            config.folder_path = document.getElementById("ds-cfg-folder_path").value.trim();
-        } else if (sourceType === "rest_api") {
-            config.base_url = document.getElementById("ds-cfg-base_url").value.trim();
-            config.auth_type = document.getElementById("ds-cfg-auth_type").value;
-            var authConfigRaw = document.getElementById("ds-cfg-auth_config").value.trim();
-            if (authConfigRaw) {
-                try {
-                    config.auth_config = JSON.parse(authConfigRaw);
-                } catch (e) {
-                    throw new Error("Auth Config must be valid JSON");
-                }
-            } else {
-                config.auth_config = {};
-            }
-            var endpointsRaw = document.getElementById("ds-cfg-endpoints").value.trim();
-            config.endpoints = endpointsRaw ? endpointsRaw.split("\n").map(function (l) { return l.trim(); }).filter(Boolean) : [];
-            config.response_text_field = document.getElementById("ds-cfg-response_text_field").value.trim();
-        }
-        return config;
-    }
-
-    window.saveDataSource = function () {
-        var editId = document.getElementById("ds-edit-id").value;
-        var name = document.getElementById("ds-name").value.trim();
-        var sourceType = document.getElementById("ds-type").value;
-        var minRole = document.getElementById("ds-min-role").value;
-
-        if (!name) {
-            alert("Name is required.");
-            return;
-        }
-
-        var config;
-        try {
-            config = buildConfigFromForm(sourceType);
-        } catch (e) {
-            alert(e.message);
-            return;
-        }
-
-        var payload = {
-            name: name,
-            source_type: sourceType,
-            config: config,
-            min_role_level: minRole,
-        };
-
-        var url, method;
-        if (editId) {
-            url = "/api/admin/datasources/" + encodeURIComponent(editId);
-            method = "PUT";
-        } else {
-            url = "/api/admin/datasources";
-            method = "POST";
-        }
-
-        fetchWithAuthBody(url, method, payload)
-            .then(function (data) {
-                if (data.error) {
-                    alert("Error: " + data.error);
-                    return;
-                }
-                closeDsModal();
-                showDsToast(editId ? "Data source updated." : "Data source created.", false);
-                loadDataSources();
-            })
-            .catch(function (err) {
-                alert("Failed to save data source: " + err.message);
-            });
-    };
-
-    window.deleteDataSource = function (id) {
-        if (!confirm("Are you sure you want to delete this data source? This will also remove all indexed documents.")) {
-            return;
-        }
-
-        fetchWithAuthBody("/api/admin/datasources/" + encodeURIComponent(id), "DELETE", {})
-            .then(function (data) {
-                if (data.error) {
-                    alert("Error: " + data.error);
-                    return;
-                }
-                showDsToast("Data source deleted.", false);
-                loadDataSources();
-            })
-            .catch(function (err) {
-                alert("Failed to delete data source: " + err.message);
-            });
-    };
-
-    window.testDataSource = function (id) {
-        showDsToast("Testing connection...", false);
-        fetchWithAuthBody("/api/admin/datasources/" + encodeURIComponent(id) + "/test", "POST", {})
-            .then(function (data) {
-                if (data.error) {
-                    showDsToast("Test failed: " + data.error, true);
-                    return;
-                }
-                if (data.success) {
-                    showDsToast("Connection successful: " + (data.message || "OK"), false);
-                } else {
-                    showDsToast("Connection failed: " + (data.message || "Unknown error"), true);
-                }
-            })
-            .catch(function (err) {
-                showDsToast("Test error: " + err.message, true);
-            });
-    };
-
-    window.triggerIndexing = function (id) {
-        showDsToast("Starting indexing...", false);
-        fetchWithAuthBody("/api/admin/datasources/" + encodeURIComponent(id) + "/index", "POST", {})
-            .then(function (data) {
-                if (data.error) {
-                    showDsToast("Indexing failed: " + data.error, true);
-                    return;
-                }
-                showDsToast("Indexing started. Status: " + (data.indexing_status || "in progress"), false);
-                // Refresh the table after a short delay to show updated status
-                setTimeout(loadDataSources, 2000);
-            })
-            .catch(function (err) {
-                showDsToast("Indexing error: " + err.message, true);
-            });
-    };
-
-    // ── Errors Tab ──
-
-    function loadErrors() {
-        fetchWithAuth("/api/admin/analytics/errors?limit=50")
-            .then(function (data) {
-                var errors = data.errors || [];
-                var tbody = document.getElementById("errors-tbody");
+                var versions = data.versions || [];
+                var tbody = document.getElementById("prompt-versions-tbody");
                 if (!tbody) return;
 
-                if (errors.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="muted" style="text-align:center;padding:32px;">No errors recorded. System is healthy.</td></tr>';
+                if (versions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="muted center-cell">No prompt versions recorded yet.</td></tr>';
                     return;
                 }
 
                 var html = "";
-                for (var i = 0; i < errors.length; i++) {
-                    var e = errors[i];
+                for (var i = 0; i < versions.length; i++) {
+                    var v = versions[i];
+                    var versionNum = versions.length - i;
+                    var isActive = v.is_active || (i === 0);
+                    var activeBadge = isActive
+                        ? '<span class="badge badge-success">Active</span>'
+                        : '<span class="badge badge-muted">Previous</span>';
+
+                    var preview = v.prompt_text || "";
+                    if (preview.length > 100) preview = preview.substring(0, 100) + "...";
+
                     html += "<tr>" +
-                        '<td class="mono muted">' + formatTimestamp(e.timestamp) + "</td>" +
-                        "<td>" + escapeHtml(e.user_id || "--") + "</td>" +
-                        '<td><span class="badge badge-error">' + escapeHtml(e.event_type) + "</span></td>" +
-                        "<td>" + escapeHtml(e.skill_name || "--") + "</td>" +
-                        '<td class="error-message-cell" title="' + escapeAttr(e.error_message) + '">' + escapeHtml(e.error_message || "--") + "</td>" +
+                        '<td class="mono">v' + versionNum + "</td>" +
+                        "<td>" + escapeHtml(v.source || "local") + "</td>" +
+                        '<td class="muted">' + escapeHtml(v.created_by || "--") + "</td>" +
+                        '<td class="muted">' + formatTimestamp(v.created_at) + "</td>" +
+                        "<td>" + activeBadge + "</td>" +
+                        '<td><span class="prompt-preview" title="' + escapeAttr(v.prompt_text || "") + '">' + escapeHtml(preview) + "</span></td>" +
                         "</tr>";
                 }
                 tbody.innerHTML = html;

@@ -92,6 +92,10 @@ class PermissionsConfig:
 
     def is_path_allowed(self, target: str) -> bool:
         resolved = str(Path(target).resolve())
+        # If no dirs explicitly configured, allow everything under user home
+        if not self.allowed_dirs:
+            home = str(Path.home().resolve())
+            return resolved.startswith(home)
         return any(resolved.startswith(d) for d in self.allowed_dirs)
 
     def grant_directory(self, directory: str):
