@@ -1,19 +1,23 @@
 # MyAi — Enterprise AI Assistant
 
-A locally-running enterprise AI assistant powered by **Ollama** and the **NexgAI AI Workforce platform**. Accessible via **Slack** (Socket Mode) and a built-in **Web UI**. All LLM inference is local — your data stays on your machine.
+A locally-running AI assistant powered by **Ollama (qwen2.5:7b)**. Accessible via **Web UI**, **WhatsApp**, and **Slack**. All LLM inference is local — your data stays on your machine.
 
 ## Features
 
-- **2-Way Routing** — Specialized tasks routed to NexgAI platform (24+ AI agents); general questions handled by local Ollama LLM
-- **SSE-to-WebSocket Streaming** — NexgAI streams responses via SSE, relayed in real-time to the Web UI
-- **Circuit Breaker** — 3 failures → 60s cooldown → transparent fallback to Ollama
-- **Slack + Web UI** — Dual interface: Slack (Socket Mode) and browser-based chat (WebSocket)
-- **Self-Learning Loop** — Thumbs up/down feedback → background learning engine → admin-approved prompt refinements
-- **Microsoft 365** — OAuth2 calendar, email, and files via Graph API
-- **Meeting Transcripts** — Real-time transcript pasting with debounced AI suggestions
-- **RAG** — Index documents for semantic search with ChromaDB
-- **Auth & RBAC** — 4-tier role hierarchy (Super Admin > Admin > Manager > Employee), session management
-- **Admin Dashboard** — Usage analytics, user management, learning approvals, satisfaction trends
+- **Hybrid Agent System** — LLM classifies intent, code executes tools reliably
+- **10 Tools** — File read/write/search, email (Outlook), WhatsApp, reminders, web search, RAG
+- **WhatsApp Bot** — Bidirectional messaging via Twilio, syncs to web UI in real-time
+- **Email via Outlook** — LLM drafts professional emails, opens in Outlook ready to send
+- **Smart Reminders** — Natural language ("remind me in 5 minutes to..."), notifies via web + WhatsApp
+- **Daily Briefing** — Auto-generated morning briefing on login + 10 AM WhatsApp delivery
+- **File Watcher** — Monitors Downloads, Desktop, Documents for new files
+- **Multi-Conversation Chat** — Claude.ai-style multiple chat threads with sidebar
+- **Dark Obsidian UI** — Modern dark theme with Space Grotesk + Inter fonts
+- **Self-Learning Loop** — Feedback collection, admin-approved prompt refinements
+- **Admin Dashboard** — Analytics, user management, learning loop, system health
+- **Auth & RBAC** — 4-tier role hierarchy, session management
+- **NexgAI Integration** — Ready to connect to 24+ specialized enterprise agents
+- **Remote Access** — Via ngrok for mobile access
 
 ## Quick Start
 
@@ -26,13 +30,13 @@ A locally-running enterprise AI assistant powered by **Ollama** and the **NexgAI
 
 ```bash
 # Clone and install
-git clone <repo-url>
-cd myai
+git clone https://github.com/anubhavnexgai/MyAi-Enterprise.git
+cd MyAi-Enterprise
 pip install -e ".[dev]"
 
 # Pull Ollama models
-ollama pull llama3.1:8b
-ollama pull nomic-embed-text  # for RAG embeddings
+ollama pull qwen2.5:7b
+ollama pull nomic-embed-text
 
 # Configure environment
 cp .env.example .env
@@ -41,81 +45,102 @@ cp .env.example .env
 # Start Ollama
 ollama serve
 
-# Run MyAi (Web UI only — no Slack credentials needed)
+# Run MyAi
 python -m app.main --web-only
-
-# Run MyAi (Slack + Web UI)
-python -m app.main
 ```
 
 Open http://localhost:8001 for the Web UI.
 
-### CLI Chat (no Slack/Web needed)
+### WhatsApp Setup
+
+1. Create a [Twilio account](https://www.twilio.com/try-twilio)
+2. Set up WhatsApp Sandbox in Twilio Console
+3. Add to `.env`:
+```bash
+TWILIO_ACCOUNT_SID=your_sid
+TWILIO_AUTH_TOKEN=your_token
+TWILIO_WHATSAPP_NUMBER=+14155238886
+```
+4. Start ngrok: `ngrok http 8001`
+5. Set Twilio sandbox webhook to: `https://<ngrok-url>/whatsapp/webhook`
+
+### Remote Access
 
 ```bash
-python cli_chat.py
+ngrok http 8001
+# Access MyAi from phone at the ngrok URL
 ```
 
 ## Architecture
 
 ```
-Slack (Socket Mode) → SlackBot (app/bot.py)
-Web UI (WebSocket)  → websocket_handler (app/main.py)
+Web UI (WebSocket)  → Pre-intercepts (email/reminder/whatsapp)
+WhatsApp (Twilio)   → WhatsApp webhook
                           ↓
-                    AgentCore (app/agent/core.py)
-                     ↓                    ↓
-              NexgAIClient          OllamaClient
-            (SSE stream)          (LLM fallback)
+                    AgentCore (hybrid agent)
+                     ↓              ↓
+              LLM classifies    Code executes
+              intent + params   tools directly
                      ↓
-              NexgAI Platform
-              (24+ agents)
+              Ollama (qwen2.5:7b)
 ```
 
-**Routing:** Every message goes to NexgAI first (if configured and circuit breaker is closed). If NexgAI is unavailable or not configured, Ollama handles it as the general-purpose fallback.
+**Hybrid Tool System:**
+1. **Pre-intercepts** — Email, reminder, WhatsApp detected by regex → executed directly (100% reliable)
+2. **LLM Tool Calling** — File operations, web search → LLM outputs tool block → code executes → LLM synthesizes result
+3. **Fake Action Detection** — If LLM describes action without executing, forces re-classification
 
-**Self-Learning:** Feedback (thumbs up/down) is collected per message → background engine (every 6h) analyzes patterns → generates learning entries → admin approves via dashboard → prompts updated dynamically.
+## Tools
+
+| Tool | Execution | Description |
+|------|-----------|-------------|
+| `send_email` | Pre-intercept + LLM | LLM drafts body, opens Outlook via .eml |
+| `set_reminder` | Pre-intercept | Fires via WebSocket + WhatsApp |
+| `send_whatsapp` | Pre-intercept | Opens wa.me with pre-filled message |
+| `read_file` | LLM tool call | Read file contents |
+| `list_directory` | LLM tool call | List folder contents |
+| `search_files` | LLM tool call | Glob pattern search |
+| `write_file` | LLM tool call | Create/write files |
+| `web_search` | LLM tool call | DuckDuckGo search |
+| `rag_query` | LLM tool call | Search indexed documents |
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `/help` | Show available commands |
-| `/status` | Current config, model, and health |
-| `/model <name>` | Switch Ollama model |
-| `/allow <path>` | Grant file access to a directory |
-| `/revoke` | Revoke all file permissions |
+| `/status` | Current config and health |
+| `/remind <time> <message>` | Set a reminder |
+| `/reminders` | List active reminders |
+| `/admin` | Open admin dashboard |
+| `/connect` | Connect Microsoft 365 |
 | `/search on\|off` | Toggle web search |
-| `/index <path>` | Index directory for RAG search |
-| `/clear` | Clear conversation history |
-| `/connect` | Connect Microsoft 365 account |
-| `/calendar` | View upcoming calendar events |
-| `/email` | View recent emails |
-| `/files` | Search OneDrive files |
-| `/transcript start\|paste\|end` | Meeting transcript workflow |
+| `/index <path>` | Index directory for RAG |
+| `/clear` | Clear conversation |
 
 ## Environment Variables
 
 ```bash
-# Required for Slack
+# Ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5:7b
+
+# Twilio WhatsApp (optional)
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_WHATSAPP_NUMBER=+14155238886
+
+# Slack (optional)
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
-SLACK_SIGNING_SECRET=...
 
-# Ollama (defaults shown)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.1:8b
-
-# NexgAI Platform (optional — enables 24+ specialized agents)
-NEXGAI_ENABLED=true
-NEXGAI_BASE_URL=https://your-nexgai-instance.com
-NEXGAI_TENANT_ID=your-tenant-id
-NEXGAI_SERVICE_USER=myai-service@company.com
-NEXGAI_SERVICE_PASSWORD=...
+# NexgAI Platform (optional)
+NEXGAI_ENABLED=false
+NEXGAI_BASE_URL=http://localhost:8002
 
 # Microsoft 365 (optional)
 GRAPH_CLIENT_ID=...
 GRAPH_CLIENT_SECRET=...
-GRAPH_TENANT_ID=...
 ```
 
 See `.env.example` for all options.
@@ -123,82 +148,48 @@ See `.env.example` for all options.
 ## Testing
 
 ```bash
-# Run all tests (207 tests)
 pytest tests/ -v
-
-# Run a specific test file
-pytest tests/test_feedback.py -v
-
-# Run a specific test class or method
-pytest tests/test_feedback.py::TestFeedbackService -v
-
-# Lint
 ruff check app/
 ```
-
-| Test File | Tests | Coverage |
-|-----------|-------|----------|
-| `test_basic.py` | Smoke tests — imports, config, tool parsing |
-| `test_meeting_transcript.py` | 33 tests — session lifecycle, VTT parsing, suggestions |
-| `test_skills.py` | 34 tests — skill routing, confidence scoring |
-| `test_graph.py` | 23 tests — Graph client, OAuth, API operations |
-| `test_web_ui.py` | 13 tests — HTTP endpoints, WebSocket, static files |
-| `test_auth.py` | 36 tests — auth service, RBAC, sessions |
-| `test_nexgai.py` | 19 tests — NexgAI client, circuit breaker |
-| `test_feedback.py` | 15 tests — feedback, learning engine, prompt versions |
 
 ## Project Structure
 
 ```
 myai/
 ├── app/
-│   ├── main.py              # aiohttp server, WebSocket handler, startup
+│   ├── main.py              # Server, WebSocket, pre-intercepts, WhatsApp webhook
 │   ├── bot.py               # Slack bot + slash commands
-│   ├── config.py            # Settings (pydantic-settings)
+│   ├── config.py            # Settings
 │   ├── agent/
-│   │   ├── core.py          # AgentCore — 2-way routing (NexgAI → Ollama)
-│   │   ├── prompts.py       # System prompts
-│   │   └── tools.py         # Tool registry
+│   │   ├── core.py          # Hybrid agent (LLM classify → code execute)
+│   │   ├── prompts.py       # System prompts + tool definitions
+│   │   └── tools.py         # 10 tool implementations
 │   ├── services/
 │   │   ├── ollama.py        # Ollama API client
-│   │   ├── nexgai.py        # NexgAI client (SSE streaming, circuit breaker)
-│   │   ├── graph.py         # Microsoft Graph OAuth2 + API
+│   │   ├── whatsapp.py      # Twilio WhatsApp (send/receive)
+│   │   ├── briefing.py      # Daily briefing generator
+│   │   ├── reminders.py     # Reminder service + check loop
+│   │   ├── file_watcher.py  # Watchdog file monitoring
+│   │   ├── nexgai_client.py # NexgAI platform integration
+│   │   ├── graph.py         # Microsoft Graph OAuth2
 │   │   ├── file_access.py   # Sandboxed file operations
-│   │   ├── web_search.py    # DuckDuckGo / Tavily
-│   │   ├── rag.py           # ChromaDB + embeddings
-│   │   └── meeting_transcript.py  # Real-time transcript service
-│   ├── learning/
-│   │   ├── feedback_service.py  # Feedback CRUD
-│   │   ├── engine.py        # Background learning engine
-│   │   └── routes.py        # Admin learning API + dashboard
-│   ├── security/
-│   │   ├── permissions.py   # Permission manager
-│   │   └── auth.py          # Auth service, RBAC, sessions
-│   └── storage/
-│       ├── database.py      # SQLite (18 tables)
-│       └── models.py        # Pydantic data models
+│   │   ├── web_search.py    # DuckDuckGo search
+│   │   └── rag.py           # ChromaDB + embeddings
+│   ├── admin/               # Dashboard analytics + routes
+│   ├── learning/            # Feedback + learning engine
+│   ├── auth/                # Auth service, RBAC
+│   └── storage/             # SQLite database
 ├── web/
-│   ├── index.html           # Chat UI
-│   ├── styles.css           # Styles
-│   ├── app.js               # WebSocket client + feedback UI
-│   └── learning.html        # Admin learning dashboard
-├── tests/                   # 207 tests
-├── scripts/                 # Utility scripts
-├── docs/                    # PRD
+│   ├── index.html           # Dark obsidian chat UI
+│   ├── styles.css           # Obsidian theme styles
+│   ├── app.js               # WebSocket client, multi-conversation
+│   ├── admin.html/css/js    # Admin dashboard
+├── tests/
+├── scripts/
 ├── .env.example
-├── pyproject.toml
-└── CLAUDE.md
+└── pyproject.toml
 ```
-
-## Docker
-
-```bash
-docker compose up --build
-```
-
-Ollama must be running on the host. The container connects via `host.docker.internal`.
 
 ## License
 
-MIT
-# MyAi-Enterprise
+Proprietary — Enterprise Copilot Ltd
