@@ -917,33 +917,50 @@ async def whatsapp_webhook(req: web.Request) -> web.Response:
             _due = reminder_service.parse_time_expression(_time_expr)
             if _due:
                 reminder_service.add_reminder(user_id_for_msg, _rem_msg, _due)
+                # Notify web UI
+                for client_id, client_ws in _ws_clients.items():
+                    if not client_ws.closed:
+                        try:
+                            await client_ws.send_json({"type": "conversations_updated"})
+                        except Exception:
+                            pass
                 twiml = whatsapp_service.create_twiml_response(
                     f"Reminder set for {_due.strftime('%I:%M %p')}: {_rem_msg}"
                 )
                 return web.Response(text=twiml, content_type="text/xml")
 
-        # Process through the agent using the linked user's account
-        result = await agent.process_message(
-            user_id_for_msg, body, user_name=linked_user_name,
-            conversation_id=wa_conv_id,
+        # Process in background — Twilio has 15s timeout, agent takes longer
+        async def _process_wa_background():
+            try:
+                result = await agent.process_message(
+                    user_id_for_msg, body, user_name="Anubhav",
+                    conversation_id=wa_conv_id,
+                )
+                response_text = result.get("text", "Sorry, something went wrong.")
+                if len(response_text) > 1500:
+                    response_text = response_text[:1500] + "..."
+
+                # Send reply via Twilio API (not TwiML)
+                await whatsapp_service.send_message(from_number, response_text)
+
+                # Refresh conversation list in web UI
+                for client_id, client_ws in _ws_clients.items():
+                    if not client_ws.closed:
+                        try:
+                            await client_ws.send_json({"type": "conversations_updated"})
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"WhatsApp background processing failed: {e}")
+                await whatsapp_service.send_message(from_number, "Sorry, an error occurred.")
+
+        asyncio.create_task(_process_wa_background())
+
+        # Return empty TwiML immediately (within Twilio's timeout)
+        return web.Response(
+            text='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            content_type="text/xml",
         )
-        response_text = result.get("text", "Sorry, something went wrong.")
-
-        # Truncate if too long for WhatsApp (1600 char limit)
-        if len(response_text) > 1500:
-            response_text = response_text[:1500] + "..."
-
-        # Silently refresh conversation list in web UI (no notifications)
-        for client_id, client_ws in _ws_clients.items():
-            if not client_ws.closed:
-                try:
-                    await client_ws.send_json({"type": "conversations_updated"})
-                except Exception:
-                    pass
-
-        # Send reply via TwiML
-        twiml = whatsapp_service.create_twiml_response(response_text)
-        return web.Response(text=twiml, content_type="text/xml")
 
     except Exception as e:
         logger.error(f"WhatsApp webhook error: {e}", exc_info=True)

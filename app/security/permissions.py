@@ -50,7 +50,7 @@ class PermissionManager:
         self._search_enabled[user_id] = enabled
 
     def is_search_enabled(self, user_id: str) -> bool:
-        return self._search_enabled.get(user_id, False)
+        return self._search_enabled.get(user_id, True)
 
 
 auth_service = AuthService()
