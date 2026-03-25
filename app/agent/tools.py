@@ -120,7 +120,7 @@ class ToolRegistry:
             return f"Couldn't understand the time: '{time}'. Try 'in 5 minutes', 'at 3pm', or 'tomorrow at 9am'."
 
         user_id = self._reminder_user_id or "default"
-        reminder = self._reminder_service.add_reminder(user_id, message, due_at)
+        reminder = await self._reminder_service.add_reminder(user_id, message, due_at)
         return (
             f"Reminder set!\n"
             f"Message: {message}\n"

@@ -242,6 +242,19 @@ class Database:
                 ON feedback(rating, created_at)
             """)
 
+            # ── Reminders ──
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    fired INTEGER DEFAULT 0
+                )
+            """)
+
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS learning_entries (
                     id TEXT PRIMARY KEY,
@@ -1112,3 +1125,44 @@ class Database:
             if user_rank >= source_rank:
                 results.append(dict(row))
         return results
+
+    # ── Reminder persistence ──
+
+    async def save_reminder(self, id: str, user_id: str, message: str, due_at: str, created_at: str):
+        """Insert a new reminder row."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO reminders (id, user_id, message, due_at, created_at) VALUES (?, ?, ?, ?, ?)",
+                (id, user_id, message, due_at, created_at),
+            )
+            await db.commit()
+
+    async def get_active_reminders(self) -> list[dict]:
+        """Return all reminders that have not been fired yet."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM reminders WHERE fired = 0")
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def mark_reminder_fired(self, id: str):
+        """Mark a reminder as fired."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("UPDATE reminders SET fired = 1 WHERE id = ?", (id,))
+            await db.commit()
+
+    async def get_user_reminders(self, user_id: str) -> list[dict]:
+        """Return active (unfired) reminders for a specific user."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM reminders WHERE user_id = ? AND fired = 0", (user_id,)
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def delete_reminder(self, id: str):
+        """Delete a reminder row."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM reminders WHERE id = ?", (id,))
+            await db.commit()

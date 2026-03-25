@@ -76,7 +76,7 @@ file_service = FileAccessService()
 
 # -- Initialize file watcher and reminders --
 file_watcher = FileWatcherService()
-reminder_service = ReminderService()
+reminder_service = ReminderService(database)
 whatsapp_service = WhatsAppService()
 tool_registry = ToolRegistry(file_service, search_service, rag_service)
 tool_registry._reminder_service = reminder_service
@@ -638,7 +638,7 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                             _rem_msg = _remind_match.group(2).strip()
                             _due = reminder_service.parse_time_expression(_time_expr)
                             if _due:
-                                reminder_service.add_reminder(user_id, _rem_msg, _due)
+                                await reminder_service.add_reminder(user_id, _rem_msg, _due)
                                 await ws.send_json({
                                     "type": "response",
                                     "text": f"Reminder set for {_due.strftime('%I:%M %p')}: {_rem_msg}",
@@ -834,12 +834,12 @@ async def _handle_web_command(text: str, user_id: str, user_name: str) -> str | 
         if not message:
             return "Please include a message for the reminder."
 
-        reminder = reminder_service.add_reminder(user_id, message, due_at)
+        reminder = await reminder_service.add_reminder(user_id, message, due_at)
         return f"**Reminder set!**\n\n{message}\n\nDue: {due_at.strftime('%I:%M %p, %B %d')}"
 
     # Handle /reminders command — list active reminders
     if text.strip() == "/reminders":
-        reminders = reminder_service.list_reminders(user_id)
+        reminders = await reminder_service.list_reminders(user_id)
         if not reminders:
             return "No active reminders."
         lines = ["**Active Reminders:**\n"]
@@ -916,7 +916,7 @@ async def whatsapp_webhook(req: web.Request) -> web.Response:
             _rem_msg = _remind_match.group(2).strip()
             _due = reminder_service.parse_time_expression(_time_expr)
             if _due:
-                reminder_service.add_reminder(user_id_for_msg, _rem_msg, _due)
+                await reminder_service.add_reminder(user_id_for_msg, _rem_msg, _due)
                 # Notify web UI
                 for client_id, client_ws in _ws_clients.items():
                     if not client_ws.closed:
@@ -1324,6 +1324,9 @@ async def on_startup(web_only: bool = False):
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
     Path(settings.chroma_path).mkdir(parents=True, exist_ok=True)
     await database.init()
+
+    # Load persisted reminders from database
+    await reminder_service.load_from_db()
 
     # Load any admin-approved system prompt from the database
     active_prompt = await database.get_active_prompt("local")
