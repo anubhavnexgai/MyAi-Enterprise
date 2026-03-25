@@ -1,0 +1,23 @@
+# AgentHub Access Policy — Enterprise Copilot
+tenant_id: enterprise_copilot
+roles:
+  employee:
+    allowed_agents:
+      - service_agent
+      - faq_agent
+      - hr_agent
+    max_authority_level: L2
+  manager:
+    allowed_agents:
+      - service_agent
+      - faq_agent
+      - hr_agent
+      - compliance_agent
+      - analytics_agent
+    max_authority_level: L3
+  admin:
+    allowed_agents: ["*"]
+    max_authority_level: L5
+  super_admin:
+    allowed_agents: ["*"]
+    max_authority_level: L5

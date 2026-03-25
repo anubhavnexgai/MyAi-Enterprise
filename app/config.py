@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     nexgai_circuit_breaker_cooldown: int = 60
     nexgai_agent_cache_ttl: int = 300   # seconds to cache agent list
 
+    # AgentHub (Phase 2)
+    agenthub_enabled: bool = False  # OFF by default
+    agenthub_base_url: str = ""
+    agenthub_api_key: str = ""
+    agenthub_tenant_id: str = "enterprise_copilot"
+    agenthub_timeout: int = 30
+
     # Self-Learning Loop (Phase 4)
     learning_interval_hours: int = 6
     learning_min_negative_feedback: int = 3  # min thumbs-down before engine generates suggestions
