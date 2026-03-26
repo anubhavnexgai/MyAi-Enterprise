@@ -91,7 +91,17 @@ def build_tool_prompt() -> str:
         "- rag_query: Search indexed documents. Args: {\"question\": \"...\"}\n"
         "- send_email: Draft an email and open it in Outlook. Args: {\"to\": \"email@example.com\", \"subject\": \"...\", \"body\": \"...\"}\n"
         "- send_whatsapp: Send a WhatsApp message. Args: {\"phone\": \"919876543210\", \"message\": \"...\"}\n"
-        "- set_reminder: Set a reminder. Args: {\"time\": \"in 5 minutes\", \"message\": \"drink water\"}\n\n"
+        "- set_reminder: Set a reminder. Args: {\"time\": \"in 5 minutes\", \"message\": \"drink water\"}\n"
+        "- app_launcher: Open a Windows application. Args: {\"app_name\": \"notepad\"}\n"
+        "- clipboard_read: Read the system clipboard contents. Args: (none)\n"
+        "- clipboard_write: Write text to the system clipboard. Args: {\"text\": \"...\"}\n"
+        "- pdf_reader: Extract text from a PDF file. Args: {\"path\": \"C:\\\\...\\\\file.pdf\"}\n"
+        "- csv_reader: Read and analyze a CSV file. Args: {\"path\": \"...\", \"query\": \"optional search term\"}\n"
+        "- system_info: Get system info (CPU, memory, disk, battery). Args: (none)\n"
+        "- screenshot: Take a screenshot. Args: {\"save_path\": \"optional path\"}\n"
+        "- git_status: Get git status of a repo. Args: {\"repo_path\": \"optional path\"}\n"
+        "- url_summarizer: Fetch and extract text from a URL. Args: {\"url\": \"https://...\"}\n"
+        "- open_url: Open a URL in the default browser. Args: {\"url\": \"https://...\"}\n\n"
         "IMPORTANT CONTEXT:\n"
         f"- This is a Windows PC. The user's home directory is: {home}\n"
         f"- Always use Windows paths with backslashes.\n"
@@ -239,6 +249,143 @@ TOOL_DEFINITIONS = [
                     "message": {"type": "string", "description": "What to remind about"}
                 },
                 "required": ["time", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "app_launcher",
+            "description": "Open a Windows application by name (e.g., notepad, calculator, chrome, code, outlook, teams).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {"type": "string", "description": "Name of the application to launch (e.g., 'notepad', 'chrome', 'calculator')"}
+                },
+                "required": ["app_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clipboard_read",
+            "description": "Read the current contents of the system clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clipboard_write",
+            "description": "Copy text to the system clipboard.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to copy to the clipboard"}
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pdf_reader",
+            "description": "Extract and read text content from a PDF file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the PDF file"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "csv_reader",
+            "description": "Read and analyze a CSV file. Shows columns, row count, and data. Optionally search/filter rows.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the CSV file"},
+                    "query": {"type": "string", "description": "Optional search term to filter rows"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "system_info",
+            "description": "Get current system information: CPU usage, memory usage, disk space, battery status, and uptime.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "screenshot",
+            "description": "Take a screenshot of the screen and save it as a PNG file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "save_path": {"type": "string", "description": "Optional absolute path to save the screenshot. Defaults to user's Screenshots folder."}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "Get git status, recent commits, and diff stats for a repository.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo_path": {"type": "string", "description": "Absolute path to the git repository. Defaults to ~/Downloads/myai."}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "url_summarizer",
+            "description": "Fetch a URL and extract its text content for reading/summarization.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch and extract text from"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_url",
+            "description": "Open a URL in the user's default web browser.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to open in the browser"}
+                },
+                "required": ["url"]
             }
         }
     },

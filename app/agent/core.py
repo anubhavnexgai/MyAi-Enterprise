@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from app.auth.models import User
     from app.auth.rbac import RBACService
     from app.services.nexgai_client import NexgAIClient
+    from app.services.agenthub_router import AgentHubRouter
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +31,13 @@ class AgentCore:
         database: Database,
         nexgai_client: NexgAIClient | None = None,
         tools: ToolRegistry | None = None,
+        agenthub_router: AgentHubRouter | None = None,
     ):
         self.ollama = ollama
         self.db = database
         self.nexgai: NexgAIClient | None = nexgai_client
         self.tools: ToolRegistry | None = tools
+        self.agenthub_router: AgentHubRouter | None = agenthub_router
         self.rbac_service: RBACService | None = None
         self._prompt_override: str | None = None  # Set by learning loop when admin approves a refinement
 
@@ -75,20 +78,40 @@ class AgentCore:
         error_message = None
 
         try:
-            # 1. Try NexgAI platform agents
-            nexgai_result = await self._try_nexgai(user_id, user_name, user_text)
-            if nexgai_result:
-                event_type = "nexgai_execution"
-                response = nexgai_result
-                source = "nexgai"
-                # Extract agent name from response header
-                _m = re.match(r"_Handled by \*(\w+)\*", response)
-                if _m:
-                    skill_name = _m.group(1)
-            else:
-                # 2. Fall back to Ollama LLM with tool-calling
-                event_type = "llm_conversation"
-                response = await self._chat(conv)
+            # 0. Try AgentHub first (if enabled) — the newer, governed gateway
+            ah_handled = False
+            if self.agenthub_router:
+                try:
+                    ah_result = await self.agenthub_router.route(
+                        message=user_text,
+                        user_id=user_id,
+                        user=user,
+                        conversation_id=conv.id,
+                    )
+                    if ah_result:
+                        response = ah_result.get("text", "")
+                        source = "agenthub"
+                        skill_name = ah_result.get("agent_name")
+                        event_type = "agenthub_execution"
+                        ah_handled = True
+                except Exception as ah_exc:
+                    logger.warning("AgentHub routing failed: %s — falling through", ah_exc)
+
+            if not ah_handled:
+                # 1. Try NexgAI platform agents
+                nexgai_result = await self._try_nexgai(user_id, user_name, user_text)
+                if nexgai_result:
+                    event_type = "nexgai_execution"
+                    response = nexgai_result
+                    source = "nexgai"
+                    # Extract agent name from response header
+                    _m = re.match(r"_Handled by \*(\w+)\*", response)
+                    if _m:
+                        skill_name = _m.group(1)
+                else:
+                    # 2. Fall back to Ollama LLM with tool-calling
+                    event_type = "llm_conversation"
+                    response = await self._chat(conv)
         except Exception as e:
             success = False
             error_message = str(e)[:500]

@@ -34,6 +34,16 @@ class ToolRegistry:
             "send_email": self._send_email,
             "send_whatsapp": self._send_whatsapp,
             "set_reminder": self._set_reminder,
+            "app_launcher": self._app_launcher,
+            "clipboard_read": self._clipboard_read,
+            "clipboard_write": self._clipboard_write,
+            "pdf_reader": self._pdf_reader,
+            "csv_reader": self._csv_reader,
+            "system_info": self._system_info,
+            "screenshot": self._screenshot,
+            "git_status": self._git_status,
+            "url_summarizer": self._url_summarizer,
+            "open_url": self._open_url,
         }
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -151,6 +161,372 @@ class ToolRegistry:
             )
         except Exception as e:
             return f"Failed to open WhatsApp: {e}"
+
+    async def _app_launcher(self, app_name: str) -> str:
+        """Open a Windows application by name."""
+        import subprocess
+
+        app_map = {
+            "notepad": "notepad.exe",
+            "calculator": "calc.exe",
+            "calc": "calc.exe",
+            "explorer": "explorer.exe",
+            "file explorer": "explorer.exe",
+            "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "firefox": r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            "code": "code",
+            "vscode": "code",
+            "vs code": "code",
+            "outlook": "outlook.exe",
+            "teams": r"C:\Users\anubh\AppData\Local\Microsoft\Teams\current\Teams.exe",
+            "slack": r"C:\Users\anubh\AppData\Local\slack\slack.exe",
+            "paint": "mspaint.exe",
+            "cmd": "cmd.exe",
+            "powershell": "powershell.exe",
+            "task manager": "taskmgr.exe",
+            "settings": "ms-settings:",
+            "snipping tool": "snippingtool.exe",
+            "word": "winword.exe",
+            "excel": "excel.exe",
+            "powerpoint": "powerpnt.exe",
+        }
+
+        key = app_name.strip().lower()
+        executable = app_map.get(key, app_name)
+
+        try:
+            if executable.startswith("ms-"):
+                import os
+                os.startfile(executable)
+            else:
+                subprocess.Popen(
+                    executable,
+                    shell=True,
+                    creationflags=0x08000000,
+                )
+            return f"Launched {app_name} successfully."
+        except Exception as e:
+            return f"Failed to launch {app_name}: {e}"
+
+    async def _clipboard_read(self) -> str:
+        """Read the system clipboard contents."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command", "Get-Clipboard"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=0x08000000,
+            )
+            content = result.stdout.strip()
+            if not content:
+                return "Clipboard is empty."
+            if len(content) > 8000:
+                return content[:8000] + f"\n\n... [truncated, {len(content)} chars total]"
+            return f"Clipboard contents:\n{content}"
+        except Exception as e:
+            return f"Failed to read clipboard: {e}"
+
+    async def _clipboard_write(self, text: str) -> str:
+        """Write text to the system clipboard."""
+        import subprocess
+
+        try:
+            subprocess.run(
+                ["powershell", "-Command", f"Set-Clipboard -Value '{text}'"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=0x08000000,
+            )
+            return f"Copied to clipboard ({len(text)} chars)."
+        except Exception as e:
+            return f"Failed to write to clipboard: {e}"
+
+    async def _pdf_reader(self, path: str) -> str:
+        """Extract text from a PDF file."""
+        try:
+            from PyPDF2 import PdfReader
+
+            reader = PdfReader(path)
+            pages = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                if text.strip():
+                    pages.append(f"--- Page {i + 1} ---\n{text}")
+
+            if not pages:
+                return "Could not extract any text from the PDF. It may be scanned/image-based."
+
+            full_text = "\n\n".join(pages)
+            if len(full_text) > 8000:
+                return full_text[:8000] + f"\n\n... [truncated, {len(full_text)} chars total, {len(reader.pages)} pages]"
+            return f"PDF ({len(reader.pages)} pages):\n\n{full_text}"
+        except FileNotFoundError:
+            return f"File not found: {path}"
+        except Exception as e:
+            return f"Failed to read PDF: {e}"
+
+    async def _csv_reader(self, path: str, query: str = "") -> str:
+        """Read and analyze a CSV or Excel file."""
+        import csv
+        import os
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".xlsx", ".xls"):
+            return "Excel files (.xlsx/.xls) are not supported yet. Please convert to CSV first."
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+
+            if not rows:
+                return "The CSV file is empty."
+
+            headers = rows[0]
+            data_rows = rows[1:]
+            total = len(data_rows)
+
+            result_lines = [
+                f"CSV File: {os.path.basename(path)}",
+                f"Columns ({len(headers)}): {', '.join(headers)}",
+                f"Total rows: {total}",
+                "",
+            ]
+
+            if query:
+                query_lower = query.lower()
+                matched = [r for r in data_rows if any(query_lower in cell.lower() for cell in r)]
+                result_lines.append(f"Search '{query}': {len(matched)} matches")
+                show_rows = matched[:20]
+            else:
+                show_rows = data_rows[:20]
+
+            if show_rows:
+                # Format as table
+                col_widths = [len(h) for h in headers]
+                for row in show_rows:
+                    for i, cell in enumerate(row):
+                        if i < len(col_widths):
+                            col_widths[i] = max(col_widths[i], min(len(cell), 30))
+
+                header_line = " | ".join(h.ljust(col_widths[i])[:30] for i, h in enumerate(headers))
+                result_lines.append(header_line)
+                result_lines.append("-" * len(header_line))
+                for row in show_rows:
+                    line = " | ".join(
+                        (row[i] if i < len(row) else "").ljust(col_widths[i])[:30]
+                        for i in range(len(headers))
+                    )
+                    result_lines.append(line)
+
+                if (not query and total > 20) or (query and len(matched) > 20):
+                    result_lines.append(f"\n... showing first 20 of {'matches' if query else 'rows'}")
+
+            output = "\n".join(result_lines)
+            if len(output) > 8000:
+                return output[:8000] + "\n... [truncated]"
+            return output
+        except FileNotFoundError:
+            return f"File not found: {path}"
+        except Exception as e:
+            return f"Failed to read CSV: {e}"
+
+    async def _system_info(self) -> str:
+        """Get system information: CPU, memory, disk, battery."""
+        lines = []
+
+        try:
+            import psutil
+
+            # CPU
+            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_count = psutil.cpu_count()
+            lines.append(f"CPU: {cpu_percent}% usage ({cpu_count} cores)")
+
+            # Memory
+            mem = psutil.virtual_memory()
+            lines.append(
+                f"Memory: {mem.percent}% used "
+                f"({mem.used // (1024**3):.1f} GB / {mem.total // (1024**3):.1f} GB)"
+            )
+
+            # Disk
+            for part in psutil.disk_partitions():
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    lines.append(
+                        f"Disk {part.device}: {usage.percent}% used "
+                        f"({usage.used // (1024**3):.0f} GB / {usage.total // (1024**3):.0f} GB)"
+                    )
+                except PermissionError:
+                    pass
+
+            # Battery
+            battery = psutil.sensors_battery()
+            if battery:
+                plug = "plugged in" if battery.power_plugged else "on battery"
+                lines.append(f"Battery: {battery.percent}% ({plug})")
+
+            # Uptime
+            import time
+            boot = psutil.boot_time()
+            uptime_secs = int(time.time() - boot)
+            hours, remainder = divmod(uptime_secs, 3600)
+            mins, _ = divmod(remainder, 60)
+            lines.append(f"Uptime: {hours}h {mins}m")
+
+        except ImportError:
+            # Fallback without psutil
+            import subprocess
+            result = subprocess.run(
+                ["powershell", "-Command",
+                 "Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory | Format-List"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=0x08000000,
+            )
+            lines.append(result.stdout.strip() or "Could not retrieve system info (psutil not installed).")
+
+        return "\n".join(lines)
+
+    async def _screenshot(self, save_path: str = "") -> str:
+        """Take a screenshot and save it."""
+        import os
+        import subprocess
+        from datetime import datetime
+
+        if not save_path:
+            # Default to user's Screenshots folder
+            screenshots_dir = os.path.join(os.path.expanduser("~"), "Pictures", "Screenshots")
+            onedrive_dir = os.path.join(os.path.expanduser("~"), "OneDrive", "Pictures", "Screenshots")
+            if os.path.isdir(onedrive_dir):
+                screenshots_dir = onedrive_dir
+            os.makedirs(screenshots_dir, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = os.path.join(screenshots_dir, f"screenshot_{timestamp}.png")
+
+        # Use PowerShell to take a screenshot
+        ps_script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen
+$bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
+$bitmap.Save('{save_path}')
+$graphics.Dispose()
+$bitmap.Dispose()
+"""
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command", ps_script],
+                capture_output=True, text=True, timeout=10,
+                creationflags=0x08000000,
+            )
+            if os.path.exists(save_path):
+                return f"Screenshot saved to: {save_path}"
+            else:
+                return f"Screenshot may have failed. PowerShell output: {result.stderr or result.stdout}"
+        except Exception as e:
+            return f"Failed to take screenshot: {e}"
+
+    async def _git_status(self, repo_path: str = "") -> str:
+        """Get git status of a repository."""
+        import subprocess
+        import os
+
+        if not repo_path:
+            repo_path = os.path.join(os.path.expanduser("~"), "Downloads", "myai")
+
+        if not os.path.isdir(repo_path):
+            return f"Directory not found: {repo_path}"
+
+        sections = []
+
+        try:
+            # git status
+            result = subprocess.run(
+                ["git", "status", "--short"],
+                capture_output=True, text=True, cwd=repo_path, timeout=10,
+                creationflags=0x08000000,
+            )
+            status = result.stdout.strip()
+            sections.append(f"Status:\n{status or '(clean — no changes)'}")
+
+            # git branch
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True, text=True, cwd=repo_path, timeout=10,
+                creationflags=0x08000000,
+            )
+            branch = result.stdout.strip()
+            sections.insert(0, f"Branch: {branch}")
+
+            # git log
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-5"],
+                capture_output=True, text=True, cwd=repo_path, timeout=10,
+                creationflags=0x08000000,
+            )
+            log = result.stdout.strip()
+            if log:
+                sections.append(f"Recent commits:\n{log}")
+
+            # git diff --stat
+            result = subprocess.run(
+                ["git", "diff", "--stat"],
+                capture_output=True, text=True, cwd=repo_path, timeout=10,
+                creationflags=0x08000000,
+            )
+            diff = result.stdout.strip()
+            if diff:
+                sections.append(f"Unstaged changes:\n{diff}")
+
+        except FileNotFoundError:
+            return "Git is not installed or not in PATH."
+        except Exception as e:
+            return f"Failed to get git status: {e}"
+
+        return "\n\n".join(sections)
+
+    async def _url_summarizer(self, url: str) -> str:
+        """Fetch a URL and return its text content for summarization."""
+        import re
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+                response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+                response.raise_for_status()
+                html = response.text
+        except Exception as e:
+            return f"Failed to fetch URL: {e}"
+
+        # Strip HTML tags
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Decode HTML entities
+        import html as html_mod
+        text = html_mod.unescape(text)
+
+        if not text:
+            return "Could not extract any text from the page."
+
+        if len(text) > 3000:
+            text = text[:3000] + f"\n\n... [truncated, {len(text)} chars total]"
+
+        return f"Content from {url}:\n\n{text}"
+
+    async def _open_url(self, url: str) -> str:
+        """Open a URL in the default browser."""
+        import webbrowser
+
+        try:
+            webbrowser.open(url)
+            return f"Opened {url} in your default browser."
+        except Exception as e:
+            return f"Failed to open URL: {e}"
 
     @staticmethod
     def parse_tool_call(text: str) -> dict | None:

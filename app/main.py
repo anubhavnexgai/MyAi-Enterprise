@@ -33,6 +33,8 @@ from app.services.doc_processor import DocumentProcessor
 from app.services.encryption import ConfigEncryption
 from app.services.indexing import IndexingService
 from app.services.nexgai_client import NexgAIClient
+from app.services.agenthub_client import AgentHubClient
+from app.services.agenthub_router import AgentHubRouter
 from app.services.web_search import WebSearchService
 from app.services.file_access import FileAccessService
 from app.agent.tools import ToolRegistry
@@ -70,6 +72,10 @@ indexing_service = IndexingService(database, rag_service, doc_processor, encrypt
 # -- Initialize NexgAI integration --
 nexgai_client = NexgAIClient()
 
+# -- Initialize AgentHub integration (off by default) --
+agenthub_client = AgentHubClient()
+agenthub_router = AgentHubRouter(agenthub_client) if agenthub_client.is_configured else None
+
 # -- Initialize web search and file access --
 search_service = WebSearchService()
 file_service = FileAccessService()
@@ -86,6 +92,7 @@ agent = AgentCore(
     ollama_client, database,
     nexgai_client=nexgai_client if nexgai_client.is_configured else None,
     tools=tool_registry,
+    agenthub_router=agenthub_router,
 )
 agent.rbac_service = rbac_service
 
@@ -146,6 +153,10 @@ async def health(req: web.Request) -> web.Response:
     if nexgai_ok is not None:
         result["nexgai"] = "connected" if nexgai_ok else "unreachable"
         result["nexgai_circuit_breaker"] = "open" if nexgai_client.circuit_breaker.is_open else "closed"
+    if agenthub_client.is_configured:
+        ah_health = await agenthub_client.health_check()
+        result["agenthub"] = "connected" if ah_health.get("ok") else "unreachable"
+        result["agenthub_circuit_breaker"] = "open" if agenthub_client.circuit_breaker.is_open else "closed"
     return web.json_response(result)
 
 
@@ -1136,11 +1147,18 @@ async def web_status(req: web.Request) -> web.Response:
         if nexgai_client.circuit_breaker.is_open:
             nexgai_status = "circuit_open"
 
+    agenthub_status = False
+    if agenthub_client.is_configured:
+        agenthub_status = "configured"
+        if agenthub_client.circuit_breaker.is_open:
+            agenthub_status = "circuit_open"
+
     return web.json_response({
         "ollama": ollama_ok,
         "model": ollama_client.model,
         "graph": graph_status,
         "nexgai": nexgai_status,
+        "agenthub": agenthub_status,
         "search": search_service.enabled if search_service else False,
     })
 
@@ -1148,6 +1166,29 @@ async def web_status(req: web.Request) -> web.Response:
 async def web_skills(req: web.Request) -> web.Response:
     """List available agents for the Web UI sidebar."""
     skills = []
+
+    # AgentHub agents (governed gateway — listed first)
+    if agenthub_client.is_configured and agenthub_client.is_available:
+        try:
+            # Try to get user_id from token for role-aware discovery
+            user_id = "web-user-anon"
+            token = _extract_token(req)
+            if token:
+                token_user = await auth_service.validate_session(token)
+                if token_user:
+                    user_id = token_user.id
+            disc = await agenthub_client.discover_agents(user_id)
+            if disc.get("ok"):
+                for a in disc.get("agents", []):
+                    skills.append({
+                        "name": a.name,
+                        "agent": a.display_name,
+                        "description": a.description,
+                        "source": "agenthub",
+                        "agent_type": a.agent_type,
+                    })
+        except Exception as e:
+            logger.warning(f"Failed to fetch AgentHub agents for skills list: {e}")
 
     # NexgAI platform agents
     if nexgai_client.is_configured and nexgai_client.is_available:
@@ -1342,6 +1383,15 @@ async def on_startup(web_only: bool = False):
         else:
             nexgai_status = "Auth failed (will retry on first request)"
 
+    # Health-check AgentHub if configured
+    agenthub_status = "Not configured"
+    if agenthub_client.is_configured:
+        ah_health = await agenthub_client.health_check()
+        if ah_health.get("ok"):
+            agenthub_status = "Connected"
+        else:
+            agenthub_status = f"Unreachable ({ah_health.get('error', 'unknown')})"
+
     mode = "Web Only" if web_only else "Slack + Web"
     logger.info("=" * 60)
     logger.info(f"MyAi Agent Started ({mode})")
@@ -1349,6 +1399,7 @@ async def on_startup(web_only: bool = False):
     logger.info(f"   Web UI:   http://{settings.host}:{settings.port}")
     logger.info(f"   Graph:    {'Configured' if graph_client.is_configured else 'Not configured'}")
     logger.info(f"   NexgAI:   {nexgai_status}")
+    logger.info(f"   AgentHub: {agenthub_status}")
     logger.info("=" * 60)
 
 
