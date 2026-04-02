@@ -44,6 +44,8 @@ class ToolRegistry:
             "git_status": self._git_status,
             "url_summarizer": self._url_summarizer,
             "open_url": self._open_url,
+            "type_in_app": self._type_in_app,
+            "open_file": self._open_file,
         }
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -527,6 +529,125 @@ $bitmap.Dispose()
             return f"Opened {url} in your default browser."
         except Exception as e:
             return f"Failed to open URL: {e}"
+
+    async def _type_in_app(self, app: str = "", text: str = "", hotkey: str = "") -> str:
+        """Open an app and type text into it, or press hotkeys. Computer use."""
+        import subprocess
+        import time as _time
+
+        try:
+            import pyautogui
+            pyautogui.PAUSE = 0.3
+            pyautogui.FAILSAFE = True
+        except ImportError:
+            return "pyautogui not installed. Run: pip install pyautogui"
+
+        try:
+            # Step 1: Open the app if specified
+            if app:
+                app_map = {
+                    "notepad": "notepad.exe",
+                    "calculator": "calc.exe",
+                    "paint": "mspaint.exe",
+                    "wordpad": "wordpad.exe",
+                    "cmd": "cmd.exe",
+                    "powershell": "powershell.exe",
+                    "explorer": "explorer.exe",
+                }
+                exe = app_map.get(app.lower(), app)
+                subprocess.Popen(exe, shell=True)
+                _time.sleep(1.5)  # Wait for app to open
+
+            # Step 2: Type text if provided
+            if text:
+                # Use pyperclip/clipboard to paste (faster and handles special chars)
+                import subprocess as sp
+                sp.run(
+                    ["powershell", "-Command", f"Set-Clipboard -Value '{text.replace(chr(39), chr(39)+chr(39))}'"],
+                    capture_output=True, timeout=5,
+                    creationflags=0x08000000,
+                )
+                _time.sleep(0.3)
+                pyautogui.hotkey("ctrl", "v")
+                result = f"Typed text into {app or 'active window'}."
+
+            # Step 3: Press hotkey if specified (e.g., "ctrl+s", "alt+f4")
+            elif hotkey:
+                keys = [k.strip() for k in hotkey.split("+")]
+                pyautogui.hotkey(*keys)
+                result = f"Pressed {hotkey}."
+
+            else:
+                result = f"App '{app}' opened. No text or hotkey specified."
+
+            return result
+
+        except Exception as e:
+            return f"Failed: {e}"
+
+    async def _open_file(self, path: str) -> str:
+        """Open a file by path, name, or description. Searches common folders if not a full path."""
+        import os
+        from pathlib import Path
+
+        # If it's a full path and exists, open directly
+        if os.path.isabs(path) and os.path.exists(path):
+            os.startfile(path)
+            return f"Opened {Path(path).name}"
+
+        # Otherwise, search common folders for a matching file
+        home = Path.home()
+        search_dirs = [
+            home / "Downloads",
+            home / "OneDrive" / "Desktop",
+            home / "Desktop",
+            home / "OneDrive" / "Documents",
+            home / "Documents",
+            home / "OneDrive" / "Pictures",
+            home / "Downloads" / "myai",
+            home / "Downloads" / "openclaw-transfer",
+        ]
+
+        # Split query into keywords for flexible matching
+        query_lower = path.lower()
+        noise_words = {"the", "my", "latest", "new", "this", "that", "recent", "last", "a", "an", "file", "document", "doc"}
+        keywords = [w for w in query_lower.replace("_", " ").replace("-", " ").split() if len(w) > 2 and w not in noise_words]
+        # Also try the whole query stripped
+        query_stripped = query_lower.replace(" ", "").replace("_", "").replace("-", "")
+        matches = []
+
+        for folder in search_dirs:
+            if not folder.exists():
+                continue
+            try:
+                entries = list(folder.iterdir())
+            except PermissionError:
+                continue
+            for f in entries:
+                if not f.is_file():
+                    continue
+                fname = f.name.lower()
+                fname_stripped = fname.replace(" ", "").replace("_", "").replace("-", "")
+                # Match by: any keyword in filename, or whole query in filename
+                if query_stripped in fname_stripped or fname_stripped in query_stripped:
+                    matches.append(f)
+                elif keywords and all(kw in fname_stripped for kw in keywords):
+                    matches.append(f)
+                elif any(kw in fname_stripped for kw in keywords if len(kw) > 3):
+                    matches.append(f)
+
+        if not matches:
+            return f"Could not find a file matching '{path}'. Try providing the full path."
+
+        if len(matches) == 1:
+            os.startfile(str(matches[0]))
+            return f"Opened {matches[0].name} from {matches[0].parent}"
+
+        # Multiple matches — pick the most recent
+        matches.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        os.startfile(str(matches[0]))
+        other_names = ", ".join(m.name for m in matches[1:4])
+        return f"Opened {matches[0].name} from {matches[0].parent}. Also found: {other_names}"
 
     @staticmethod
     def parse_tool_call(text: str) -> dict | None:

@@ -720,6 +720,52 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                                 })
                                 _handled = True
 
+                        # -- Open file intercept --
+                        if not _handled:
+                            _open_match = _re.match(
+                                r"(?:open|show|view|launch)\s+(?:the\s+|my\s+|latest\s+|new\s+|this\s+)?(?:file\s+)?(.+?)(?:\s+file)?$",
+                                text, _re.IGNORECASE,
+                            )
+                            if _open_match:
+                                _file_query = _open_match.group(1).strip()
+                                # Only treat as file open if it's NOT an app name
+                                _app_names = {"notepad", "calculator", "chrome", "firefox", "code", "outlook", "teams", "slack", "explorer", "paint", "cmd", "powershell", "terminal", "wordpad"}
+                                if _file_query.lower() not in _app_names and not _file_query.lower().startswith("http"):
+                                    _result = await tool_registry._open_file(_file_query)
+                                    if "not found" not in _result.lower():
+                                        await ws.send_json({
+                                            "type": "response",
+                                            "text": _result,
+                                        })
+                                        _handled = True
+
+                        # -- Type in app intercept (computer use) --
+                        if not _handled:
+                            _type_match = _re.match(
+                                r"(?:open)\s+(\w+)\s+(?:and\s+)?(?:write|type|put|create|draft)\s+(.+)",
+                                text, _re.IGNORECASE | _re.DOTALL,
+                            )
+                            if _type_match:
+                                _app_name = _type_match.group(1).strip()
+                                _content_hint = _type_match.group(2).strip()
+
+                                await ws.send_json({"type": "typing"})
+
+                                # Use LLM to generate the content
+                                _draft_result = await ollama_client.chat(messages=[
+                                    {"role": "system", "content": "You generate content as requested. Output ONLY the content, nothing else. No explanations, no markdown formatting, just plain text."},
+                                    {"role": "user", "content": f"Write the following: {_content_hint}"},
+                                ])
+                                _content = _draft_result.get("message", {}).get("content", "").strip()
+
+                                if _content:
+                                    _result = await tool_registry._type_in_app(app=_app_name, text=_content)
+                                    await ws.send_json({
+                                        "type": "response",
+                                        "text": f"Opened {_app_name} and typed the content.",
+                                    })
+                                    _handled = True
+
                         if _handled:
                             continue
 

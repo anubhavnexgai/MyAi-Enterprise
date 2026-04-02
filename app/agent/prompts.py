@@ -101,14 +101,23 @@ def build_tool_prompt() -> str:
         "- screenshot: Take a screenshot. Args: {\"save_path\": \"optional path\"}\n"
         "- git_status: Get git status of a repo. Args: {\"repo_path\": \"optional path\"}\n"
         "- url_summarizer: Fetch and extract text from a URL. Args: {\"url\": \"https://...\"}\n"
-        "- open_url: Open a URL in the default browser. Args: {\"url\": \"https://...\"}\n\n"
+        "- open_url: Open a URL in the default browser. Args: {\"url\": \"https://...\"}\n"
+        "- type_in_app: Open an app and type text into it (computer use). Args: {\"app\": \"notepad\", \"text\": \"content to type\"} or {\"hotkey\": \"ctrl+s\"}\n"
+        "- open_file: Open a file by name or path. Searches Desktop, Downloads, Documents automatically. Args: {\"path\": \"PRD\" or \"demo script\" or \"C:\\\\Users\\\\...\"}\n\n"
         "IMPORTANT CONTEXT:\n"
         f"- This is a Windows PC. The user's home directory is: {home}\n"
         f"- Always use Windows paths with backslashes.\n"
         f"- User's folders (USE THESE EXACT PATHS):\n{folders_text}\n"
         + (f"  - Screenshots: {screenshots}\n" if screenshots else "")
         + f"- If a directory is 'not found', try the OneDrive version: {home}{bs}OneDrive{bs}...\n"
-        "- You have full access to all files under the user's home directory.\n\n"
+        "- You have full access to all files under the user's home directory.\n"
+        f"- User's project: {home}{bs}Downloads{bs}myai (git repo, Python project)\n"
+        f"  - Project config: {home}{bs}Downloads{bs}myai{bs}pyproject.toml (read this for dependencies)\n"
+        f"  - Project code: {home}{bs}Downloads{bs}myai{bs}app{bs} (main code folder)\n"
+        f"  - PRD files are in: {home}{bs}Downloads{bs} (look for PRD*.md or PRD*.docx)\n"
+        "- When user says 'my project' or 'my codebase', they mean Downloads\\myai\n"
+        "- To check git status, use repo_path: the user's project path above\n"
+        "- To check dependencies, READ pyproject.toml — do NOT try to run pip commands\n\n"
         "RULES:\n"
         "- For greetings (hi, hello, hey), respond warmly and ask how you can help. Do NOT use any tools.\n"
         "- For general knowledge questions (math, coding, explanations), answer DIRECTLY without tools.\n"
@@ -386,6 +395,36 @@ TOOL_DEFINITIONS = [
                     "url": {"type": "string", "description": "The URL to open in the browser"}
                 },
                 "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "type_in_app",
+            "description": "Open an application and type text into it, or press keyboard shortcuts. Use this for computer control — writing in Notepad, typing in any app, pressing Ctrl+S to save, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app": {"type": "string", "description": "App to open: notepad, calculator, paint, wordpad, cmd, powershell, or any executable name"},
+                    "text": {"type": "string", "description": "Text to type into the app"},
+                    "hotkey": {"type": "string", "description": "Keyboard shortcut to press (e.g., ctrl+s, alt+f4, ctrl+shift+n)"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_file",
+            "description": "Open a file by name, description, or path. Searches Desktop, Downloads, Documents automatically. Just pass the filename or keywords.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Filename, keywords, or full path. Examples: 'PRD', 'demo script', 'report.pdf', 'C:\\Users\\...'  "}
+                },
+                "required": ["path"]
             }
         }
     },
