@@ -103,7 +103,10 @@ def build_tool_prompt() -> str:
         "- url_summarizer: Fetch and extract text from a URL. Args: {\"url\": \"https://...\"}\n"
         "- open_url: Open a URL in the default browser. Args: {\"url\": \"https://...\"}\n"
         "- type_in_app: Open an app and type text into it (computer use). Args: {\"app\": \"notepad\", \"text\": \"content to type\"} or {\"hotkey\": \"ctrl+s\"}\n"
-        "- open_file: Open a file by name or path. Searches Desktop, Downloads, Documents automatically. Args: {\"path\": \"PRD\" or \"demo script\" or \"C:\\\\Users\\\\...\"}\n\n"
+        "- open_file: Open a file by name or path. Searches Desktop, Downloads, Documents automatically. Args: {\"path\": \"PRD\" or \"demo script\" or \"C:\\\\Users\\\\...\"}\n"
+        "- browse_web: Control a browser to navigate websites, search Google, fill forms. Args: {\"task\": \"go to google.com and search for AI news\"}\n"
+        "- mcp_call: Call a tool on an MCP server. Args: {\"server\": \"server_name\", \"tool\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}\n"
+        "- orchestrate: Break a complex task into subtasks and execute them in parallel. Args: {\"task\": \"research AI news and summarize my project status\"}\n\n"
         "IMPORTANT CONTEXT:\n"
         f"- This is a Windows PC. The user's home directory is: {home}\n"
         f"- Always use Windows paths with backslashes.\n"
@@ -425,6 +428,50 @@ TOOL_DEFINITIONS = [
                     "path": {"type": "string", "description": "Filename, keywords, or full path. Examples: 'PRD', 'demo script', 'report.pdf', 'C:\\Users\\...'  "}
                 },
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browse_web",
+            "description": "Control a browser to navigate websites, search Google, fill forms. Uses Playwright for browser automation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Natural language description of the browser task. Examples: 'go to google.com', 'search for AI news', 'open https://github.com'"}
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mcp_call",
+            "description": "Call a tool on a configured MCP (Model Context Protocol) server. Requires MCP servers to be configured in config/mcp_servers.json.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "Name of the MCP server to call"},
+                    "tool": {"type": "string", "description": "Name of the tool on the MCP server"},
+                    "arguments": {"type": "object", "description": "Arguments to pass to the MCP tool"}
+                },
+                "required": ["server", "tool"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "orchestrate",
+            "description": "Break a complex task into multiple subtasks and execute them in parallel using available tools. Use this for multi-step tasks that can benefit from parallel execution.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Complex task to decompose and execute in parallel"}
+                },
+                "required": ["task"]
             }
         }
     },

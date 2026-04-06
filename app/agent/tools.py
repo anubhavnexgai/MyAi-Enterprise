@@ -46,6 +46,9 @@ class ToolRegistry:
             "open_url": self._open_url,
             "type_in_app": self._type_in_app,
             "open_file": self._open_file,
+            "browse_web": self._browse_web,
+            "mcp_call": self._mcp_call,
+            "orchestrate": self._orchestrate,
         }
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
@@ -648,6 +651,28 @@ $bitmap.Dispose()
         os.startfile(str(matches[0]))
         other_names = ", ".join(m.name for m in matches[1:4])
         return f"Opened {matches[0].name} from {matches[0].parent}. Also found: {other_names}"
+
+    async def _browse_web(self, task: str) -> str:
+        """Use a browser to perform a web task."""
+        from app.services.browser_agent import BrowserAgent
+        agent = BrowserAgent()
+        return await agent.execute_task(task)
+
+    async def _mcp_call(self, server: str, tool: str, arguments: dict = None) -> str:
+        """Call a tool on an MCP server."""
+        from app.services.mcp_client import MCPClient
+        client = MCPClient()
+        client.load_config()
+        if not client.is_configured:
+            return "No MCP servers configured. Add servers to config/mcp_servers.json."
+        return await client.call_tool(server, tool, arguments or {})
+
+    async def _orchestrate(self, task: str) -> str:
+        """Break a complex task into subtasks and execute in parallel."""
+        from app.services.crew_orchestrator import CrewOrchestrator
+        from app.services.ollama import OllamaClient
+        orchestrator = CrewOrchestrator(self, OllamaClient())
+        return await orchestrator.orchestrate(task)
 
     @staticmethod
     def parse_tool_call(text: str) -> dict | None:
