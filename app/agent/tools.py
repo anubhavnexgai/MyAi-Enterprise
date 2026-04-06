@@ -23,6 +23,7 @@ class ToolRegistry:
         self.file_service = file_service
         self.search_service = search_service
         self.rag_service = rag_service
+        self._guardrails = None  # Set from main.py to enable security guardrails
 
         self._tools: dict[str, Callable[..., Awaitable[str]]] = {
             "read_file": self._read_file,
@@ -53,6 +54,12 @@ class ToolRegistry:
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Execute a tool by name with given arguments."""
+        # Guardrails check — runs BEFORE any tool execution
+        if self._guardrails:
+            allowed, reason = self._guardrails.check(tool_name, arguments)
+            if not allowed:
+                return f"Action blocked: {reason}"
+
         if tool_name not in self._tools:
             return f"Unknown tool: {tool_name}. Available: {', '.join(self._tools.keys())}"
 

@@ -1,0 +1,29 @@
+blocked_actions:
+  - file_delete
+  - shell_exec
+  - system_modify
+
+path_restrictions:
+  blocked:
+    - "C:\\Windows"
+    - "C:\\Program Files"
+  read_only:
+    - ".env"
+    - ".git"
+
+rate_limits:
+  tool_calls_per_minute: 50
+  file_writes_per_minute: 10
+  emails_per_minute: 5
+
+content_warnings:
+  - password
+  - secret
+  - api_key
+  - token
+
+malicious_domains:
+  - "evil.com"
+  - "malware.com"
+  - "phishing.com"
+  - "hack.com"
