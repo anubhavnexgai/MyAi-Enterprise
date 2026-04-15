@@ -26,10 +26,11 @@ class CrewOrchestrator:
 
     async def decompose_task(self, task: str) -> list[SubTask]:
         """Use LLM to break a complex task into subtasks."""
+        available_tools = ", ".join(self.tools._tools.keys())
         prompt = f"""Break this task into 2-5 simple subtasks that can be done independently.
 For each subtask, specify which tool to use.
 
-Available tools: read_file, list_directory, search_files, write_file, web_search, system_info, git_status, url_summarizer
+Available tools: {available_tools}
 
 Task: {task}
 

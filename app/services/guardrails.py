@@ -54,6 +54,10 @@ class GuardrailsService:
         "rag_query": "rag",
         "mcp_call": "mcp",
         "orchestrate": "orchestrate",
+        "delete_file": "file_delete",
+        "remove_file": "file_delete",
+        "delete_directory": "file_delete",
+        "remove_directory": "file_delete",
     }
 
     def __init__(self, policy_path: str | None = None):
@@ -71,6 +75,14 @@ class GuardrailsService:
         Returns ``(allowed, reason)`` where *reason* explains the decision.
         """
         warnings: list[str] = []
+
+        # 0. Catch-all: any tool with destructive keywords is blocked
+        destructive_keywords = {"delete", "remove", "erase", "wipe", "destroy", "shred", "format_disk"}
+        if any(kw in tool_name.lower() for kw in destructive_keywords):
+            if tool_name not in self._ACTION_MAP:
+                self._audit(tool_name, arguments, user_id, allowed=False,
+                            reason=f"Tool '{tool_name}' blocked (destructive keyword)")
+                return False, f"Tool '{tool_name}' is blocked — destructive actions are not allowed."
 
         # 1. Action policy
         action = self._ACTION_MAP.get(tool_name, tool_name)

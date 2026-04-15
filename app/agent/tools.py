@@ -620,11 +620,16 @@ $bitmap.Dispose()
 
         # Split query into keywords for flexible matching
         query_lower = path.lower()
-        noise_words = {"the", "my", "latest", "new", "this", "that", "recent", "last", "a", "an", "file", "document", "doc"}
-        keywords = [w for w in query_lower.replace("_", " ").replace("-", " ").split() if len(w) > 2 and w not in noise_words]
+        noise_words = {"the", "my", "latest", "new", "this", "that", "recent",
+                       "last", "a", "an", "file", "document", "doc", "open",
+                       "show", "view", "please", "can", "you", "from", "in",
+                       "downloaded", "i"}
+        keywords = [w for w in query_lower.replace("_", " ").replace("-", " ").split()
+                    if len(w) > 2 and w not in noise_words]
         # Also try the whole query stripped
         query_stripped = query_lower.replace(" ", "").replace("_", "").replace("-", "")
-        matches = []
+        # Scoring: strong match = 2, weak match = 1
+        scored_matches: list[tuple[Path, int]] = []
 
         for folder in search_dirs:
             if not folder.exists():
@@ -637,14 +642,28 @@ $bitmap.Dispose()
                 if not f.is_file():
                     continue
                 fname = f.name.lower()
+                fname_no_ext = Path(fname).stem
                 fname_stripped = fname.replace(" ", "").replace("_", "").replace("-", "")
-                # Match by: any keyword in filename, or whole query in filename
-                if query_stripped in fname_stripped or fname_stripped in query_stripped:
-                    matches.append(f)
+                fname_stem_stripped = fname_no_ext.replace(" ", "").replace("_", "").replace("-", "")
+
+                # Exact match (stripped): "myai presentation" matches "MyAi_Presentation.pptx"
+                if query_stripped in fname_stripped or fname_stem_stripped in query_stripped:
+                    scored_matches.append((f, 3))
+                # All keywords present in filename
                 elif keywords and all(kw in fname_stripped for kw in keywords):
-                    matches.append(f)
-                elif any(kw in fname_stripped for kw in keywords if len(kw) > 3):
-                    matches.append(f)
+                    scored_matches.append((f, 2))
+                # Majority of keywords present (at least 2, and >50% match)
+                elif len(keywords) >= 2:
+                    matched_kw = sum(1 for kw in keywords if kw in fname_stripped)
+                    if matched_kw >= 2 and matched_kw >= len(keywords) * 0.5:
+                        scored_matches.append((f, 1))
+
+        if not scored_matches:
+            return f"Could not find a file matching '{path}'. Try providing the full path."
+
+        # Sort by score (highest first), then by recency
+        scored_matches.sort(key=lambda x: (x[1], x[0].stat().st_mtime), reverse=True)
+        matches = [m[0] for m in scored_matches]
 
         if not matches:
             return f"Could not find a file matching '{path}'. Try providing the full path."

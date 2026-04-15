@@ -391,6 +391,10 @@ class AgentCore:
             "whatsapp message sent", "i have set a reminder",
             "the email has been", "your reminder has been",
             "message has been sent", "i've drafted", "i've sent",
+            "i have deleted", "i have removed", "i've deleted", "i've removed",
+            "files have been deleted", "files have been removed",
+            "i have erased", "successfully deleted", "successfully removed",
+            "have been wiped", "desktop has been cleared", "all files removed",
         ]
         # Only flag as fake if there's NO tool block in the text
         if "```tool" in lower or '{"name"' in lower:

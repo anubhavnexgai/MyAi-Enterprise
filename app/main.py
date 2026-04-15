@@ -37,6 +37,7 @@ from app.services.agenthub_client import AgentHubClient
 from app.services.agenthub_router import AgentHubRouter
 from app.services.web_search import WebSearchService
 from app.services.file_access import FileAccessService
+from app.services.guardrails import GuardrailsService
 from app.agent.tools import ToolRegistry
 from app.learning.feedback_service import FeedbackService
 from app.learning.engine import LearningEngine
@@ -86,6 +87,7 @@ reminder_service = ReminderService(database)
 whatsapp_service = WhatsAppService()
 tool_registry = ToolRegistry(file_service, search_service, rag_service)
 tool_registry._reminder_service = reminder_service
+tool_registry._guardrails = GuardrailsService()  # Wire security guardrails into every tool call
 
 # -- Initialize agent (NexgAI agents + Ollama LLM with tools) --
 agent = AgentCore(
@@ -635,6 +637,20 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                         import re as _re
                         _handled = False
 
+                        # -- DESTRUCTIVE ACTION BLOCKER (highest priority) --
+                        _destructive_match = _re.match(
+                            r"^(?:please\s+|can you\s+|could you\s+|i want you to\s+|go\s+)?"
+                            r"(delete|remove|erase|wipe|destroy|format|shred|empty)\b.+"
+                            r"\b(all|every|everything|files?|folders?|desktop|documents?|downloads?|directory|disk|drive)\b",
+                            text, _re.IGNORECASE,
+                        )
+                        if _destructive_match:
+                            await ws.send_json({
+                                "type": "response",
+                                "text": "I cannot perform destructive actions like deleting or removing files. This action is blocked by security policy for your safety.",
+                            })
+                            _handled = True
+
                         # -- Reminder intercept --
                         _remind_match = _re.match(
                             r"(?:remind me|set a reminder|reminder)\s+"
@@ -720,17 +736,96 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                                 })
                                 _handled = True
 
+                        # -- App launch intercept (before file open!) --
+                        if not _handled:
+                            _launch_match = _re.match(
+                                r"(?:launch|start|run|open)\s+(?:the\s+|a\s+)?(?:app\s+|application\s+)?"
+                                r"(microsoft\s+word|ms\s+word|microsoft\s+excel|ms\s+excel|microsoft\s+powerpoint|ms\s+powerpoint"
+                                r"|word|excel|powerpoint|notepad|calculator|chrome|firefox|code|vscode|vs\s+code"
+                                r"|outlook|teams|slack|explorer|file\s+explorer|paint|cmd|powershell|terminal"
+                                r"|wordpad|task\s+manager|settings|snipping\s+tool|(?:the\s+)?browser)$",
+                                text, _re.IGNORECASE,
+                            )
+                            if _launch_match:
+                                _app = _launch_match.group(1).strip().lower()
+                                # Normalize app names
+                                _app_normalize = {
+                                    "microsoft word": "word", "ms word": "word",
+                                    "microsoft excel": "excel", "ms excel": "excel",
+                                    "microsoft powerpoint": "powerpoint", "ms powerpoint": "powerpoint",
+                                    "the browser": "chrome", "browser": "chrome",
+                                }
+                                _app = _app_normalize.get(_app, _app)
+                                _result = await tool_registry._app_launcher(_app)
+                                await ws.send_json({
+                                    "type": "response",
+                                    "text": _result,
+                                })
+                                _handled = True
+
+                        # -- Open URL intercept (open github.com → opens in real browser) --
+                        if not _handled:
+                            _url_match = _re.match(
+                                r"(?:open|go to|visit|navigate to)\s+(?:the\s+)?(?:website\s+|site\s+|url\s+)?"
+                                r"(https?://\S+|(?:www\.)?[\w.-]+\.(?:com|org|io|dev|ai|net|co|edu|gov)(?:/\S*)?)\s*$",
+                                text, _re.IGNORECASE,
+                            )
+                            if _url_match:
+                                _url = _url_match.group(1).strip()
+                                if not _url.startswith("http"):
+                                    _url = "https://" + _url
+                                import webbrowser
+                                webbrowser.open(_url)
+                                await ws.send_json({
+                                    "type": "response",
+                                    "text": f"Opened {_url} in your browser.",
+                                })
+                                _handled = True
+
+                        # -- "Open latest file" intercept --
+                        if not _handled:
+                            _latest_match = _re.match(
+                                r"(?:open|show|view)\s+(?:the\s+|my\s+)?(?:latest|newest|most recent|last)\s+"
+                                r"(?:file\s+)?(?:I\s+)?(?:downloaded|in\s+downloads?|from\s+downloads?|in\s+my\s+downloads?)?$",
+                                text, _re.IGNORECASE,
+                            )
+                            if _latest_match:
+                                import os
+                                from pathlib import Path as _Path
+                                _dl_dirs = [_Path.home() / "Downloads", _Path.home() / "OneDrive" / "Downloads"]
+                                _all_files = []
+                                for _d in _dl_dirs:
+                                    if _d.exists():
+                                        _all_files.extend(f for f in _d.iterdir() if f.is_file() and not f.name.startswith("."))
+                                if _all_files:
+                                    _all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                                    _latest = _all_files[0]
+                                    os.startfile(str(_latest))
+                                    await ws.send_json({
+                                        "type": "response",
+                                        "text": f"Opened {_latest.name} (most recently modified file in Downloads).",
+                                    })
+                                    _handled = True
+                                else:
+                                    await ws.send_json({
+                                        "type": "response",
+                                        "text": "No files found in your Downloads folder.",
+                                    })
+                                    _handled = True
+
                         # -- Open file intercept --
                         if not _handled:
                             _open_match = _re.match(
-                                r"(?:open|show|view|launch)\s+(?:the\s+|my\s+|latest\s+|new\s+|this\s+)?(?:file\s+)?(.+?)(?:\s+file)?$",
+                                r"(?:open|show|view)\s+(?:the\s+|my\s+|this\s+)?(?:file\s+)?(.+?)(?:\s+file)?$",
                                 text, _re.IGNORECASE,
                             )
                             if _open_match:
                                 _file_query = _open_match.group(1).strip()
-                                # Only treat as file open if it's NOT an app name
-                                _app_names = {"notepad", "calculator", "chrome", "firefox", "code", "outlook", "teams", "slack", "explorer", "paint", "cmd", "powershell", "terminal", "wordpad"}
-                                if _file_query.lower() not in _app_names and not _file_query.lower().startswith("http"):
+                                _fq = _file_query.lower()
+                                # Skip if it looks like a URL, app name, or browser task
+                                _is_url = _fq.startswith("http") or _re.search(r"\.\w{2,3}$", _fq) and "." in _fq and " " not in _fq
+                                _is_browser_task = any(kw in text.lower() for kw in ["browse", "browser", "in the browser", "and tell me", "and search", "trending"])
+                                if not _is_url and not _is_browser_task:
                                     _result = await tool_registry._open_file(_file_query)
                                     if "not found" not in _result.lower():
                                         await ws.send_json({
@@ -738,6 +833,41 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
                                             "text": _result,
                                         })
                                         _handled = True
+
+                        # -- Browse web intercept (extract content from a site) --
+                        if not _handled:
+                            _browse_match = _re.match(
+                                r"(?:browse|go to|navigate to|visit)\s+(.+?)(?:\s+and\s+(.+))?$",
+                                text, _re.IGNORECASE,
+                            )
+                            if _browse_match:
+                                _target = _browse_match.group(1).strip()
+                                _tl = _target.lower()
+                                if ".com" in _tl or ".org" in _tl or ".io" in _tl or ".dev" in _tl or ".ai" in _tl or ".net" in _tl or _tl.startswith("http") or "google" in _tl or "search" in text.lower():
+                                    await ws.send_json({"type": "typing"})
+                                    _task = text
+                                    _result = await tool_registry._browse_web(_task)
+                                    await ws.send_json({
+                                        "type": "response",
+                                        "text": _result,
+                                    })
+                                    _handled = True
+
+                        # -- Orchestrate intercept --
+                        if not _handled:
+                            _orch_match = _re.match(
+                                r"(?:orchestrate|do all|do these|simultaneously|in parallel)[:\s]+(.+)",
+                                text, _re.IGNORECASE | _re.DOTALL,
+                            )
+                            if _orch_match:
+                                await ws.send_json({"type": "typing"})
+                                _task = _orch_match.group(1).strip()
+                                _result = await tool_registry._orchestrate(_task)
+                                await ws.send_json({
+                                    "type": "response",
+                                    "text": _result,
+                                })
+                                _handled = True
 
                         # -- Type in app intercept (computer use) --
                         if not _handled:
