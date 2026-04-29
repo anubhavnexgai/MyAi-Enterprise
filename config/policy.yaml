@@ -1,0 +1,97 @@
+# MyAi reliability / governance policy.
+#
+# This file is the single source of truth for what MyAi is allowed to do
+# without explicit human approval. It is loaded at startup by
+# `app/services/policy.py` and hot-reloaded when changed.
+#
+# All decisions made by this policy are written to the audit log
+# (`data/governance.db` :: audit_log). Anything that requires approval
+# lands in the same DB's `pending_actions` table and waits for a human ✅
+# (or auto-approves after `auto_approve_after_seconds` if set).
+
+version: 1
+
+# ------------------------------------------------------------------------
+# Tools
+# ------------------------------------------------------------------------
+tools:
+
+  # Tools whose execution must wait for human approval.
+  # Approvals can come from: web admin UI, WhatsApp/Telegram reply, CLI.
+  approval_required:
+    - send_email
+    - send_whatsapp
+    - write_file
+    - type_in_app          # can type into any app, treat as side-effect
+    - browse_web           # can submit forms / click buttons
+    - mcp_call             # arbitrary MCP-server side-effects
+    - skill_factory_install  # registering a new generated tool
+
+  # Tools that are flat-out blocked. Use sparingly — prefer approval queue.
+  blocked: []
+
+  # Tools the critic persona must review before they run (even if not in
+  # approval_required). Good for "looks innocent but isn't" cases.
+  critic_review:
+    - browse_web
+    - type_in_app
+
+# ------------------------------------------------------------------------
+# Network
+# ------------------------------------------------------------------------
+network:
+  # Hosts MyAi may reach without approval. Wildcards allowed (* prefix).
+  allowlist:
+    - localhost
+    - 127.0.0.1
+    - ollama.local
+    - api.duckduckgo.com
+    - duckduckgo.com
+    - "*.duckduckgo.com"
+    - api.telegram.org
+    - api.twilio.com
+    - github.com
+    - "*.github.com"
+    - googleapis.com
+    - "*.googleapis.com"
+
+  # What to do when an unlisted host is reached:
+  #   queue  — write to pending_actions, wait for approval
+  #   block  — refuse outright
+  #   warn   — allow but record at WARNING in audit log
+  on_unlisted: warn
+
+# ------------------------------------------------------------------------
+# Models
+# ------------------------------------------------------------------------
+# Logical role -> concrete model name. Lets us swap which model handles
+# planning vs critic vs default chat without touching code.
+models:
+  routes:
+    default: "qwen2.5:7b"
+    planner: "qwen2.5:7b"
+    critic: "qwen2.5:7b"
+    diary: "qwen2.5:7b"
+    vision: "llava:7b"
+
+# ------------------------------------------------------------------------
+# Approvals
+# ------------------------------------------------------------------------
+approvals:
+  # Auto-approve a queued action if no human has decided within this many
+  # seconds. Set to 0 to require explicit approval forever.
+  auto_approve_after_seconds: 0
+
+  # Persona whose approval counts. Currently "user" = Anubhav.
+  approver: user
+
+# ------------------------------------------------------------------------
+# Audit
+# ------------------------------------------------------------------------
+audit:
+  enabled: true
+  # full    — record full inputs and outputs (truncated past max_chars)
+  # summary — record tool name + decision only, not values
+  # off     — record nothing (NOT recommended)
+  level: full
+  max_chars_per_field: 4000

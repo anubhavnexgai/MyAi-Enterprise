@@ -162,6 +162,79 @@ async def health(req: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+# --- File attachment upload endpoint ---------------------------------------
+# Accepts multipart/form-data with one or more files. Saves under
+# data/uploads/<timestamp>_<short-uuid>_<safe-name>.<ext> and returns the
+# absolute path so the agent can use it directly with read_file / pdf_reader /
+# describe_image / etc. Used by the web UI's drag-drop and paperclip flow.
+_UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB per file
+
+# Mapping kept simple — extend as needed
+_KIND_BY_EXT = {
+    "png": "image", "jpg": "image", "jpeg": "image", "gif": "image",
+    "webp": "image", "bmp": "image",
+    "pdf": "pdf",
+    "txt": "text", "md": "text", "log": "text", "json": "text",
+    "csv": "csv",
+}
+
+
+def _safe_name(name: str) -> str:
+    import re as _re
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    name = _re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    return name[:80] or "file"
+
+
+async def upload_attachment(req: web.Request) -> web.Response:
+    """Receive uploaded files from the web UI; save under data/uploads/."""
+    try:
+        _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        reader = await req.multipart()
+        saved = []
+        async for part in reader:
+            if part.name not in ("file", "files", "file[]"):
+                continue
+            fname = _safe_name(part.filename or "file")
+            ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+            kind = _KIND_BY_EXT.get(ext, "binary")
+
+            import uuid as _uuid, time as _time
+            stamp = int(_time.time())
+            short = _uuid.uuid4().hex[:8]
+            target = _UPLOAD_DIR / f"{stamp}_{short}_{fname}"
+
+            size = 0
+            with target.open("wb") as f:
+                while True:
+                    chunk = await part.read_chunk(64 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > _MAX_UPLOAD_BYTES:
+                        f.close()
+                        try: target.unlink()
+                        except OSError: pass
+                        return web.json_response(
+                            {"error": f"file '{fname}' exceeds {_MAX_UPLOAD_BYTES // (1024*1024)} MB limit"},
+                            status=413,
+                        )
+                    f.write(chunk)
+            saved.append({
+                "path": str(target),
+                "name": fname,
+                "kind": kind,
+                "size": size,
+            })
+        if not saved:
+            return web.json_response({"error": "no files received"}, status=400)
+        return web.json_response({"attachments": saved})
+    except Exception as exc:
+        logger.error("Upload failed: %s", exc, exc_info=True)
+        return web.json_response({"error": str(exc)[:300]}, status=500)
+
+
 async def simulate_transcript(req: web.Request) -> web.Response:
     """Dev-only endpoint: inject transcript text and immediately generate a suggestion."""
     try:
@@ -585,6 +658,29 @@ async def websocket_handler(req: web.Request) -> web.WebSocketResponse:
 
                 if msg_type == "message":
                     text = (data.get("text") or "").strip()
+
+                    # Attachments arrive as a list of {path, name, kind} objects
+                    # (already saved server-side via /api/upload). Prepend a
+                    # synthesized line so the agent sees the paths and can call
+                    # describe_image / read_file / pdf_reader directly.
+                    attachments = data.get("attachments") or []
+                    if attachments:
+                        att_lines = []
+                        for a in attachments:
+                            ap = (a.get("path") or "").strip()
+                            an = (a.get("name") or "file").strip()
+                            ak = (a.get("kind") or "binary").strip()
+                            if ap:
+                                att_lines.append(f"- [{ak}] {an} → {ap}")
+                        if att_lines:
+                            prefix = (
+                                "[ATTACHMENTS]\n" + "\n".join(att_lines) +
+                                "\n\nUse these paths with describe_image / "
+                                "read_file / pdf_reader / csv_reader as "
+                                "appropriate, then answer.\n\n"
+                            )
+                            text = prefix + (text or "(no message — please describe the attachments)")
+
                     if not text:
                         continue
 
@@ -1422,6 +1518,8 @@ def create_debug_app() -> web.Application:
     app.router.add_post("/whatsapp/webhook", whatsapp_webhook)
     app.router.add_post("/api/simulate-transcript", simulate_transcript)
     app.router.add_get("/api/debug/sessions", debug_sessions)
+    app.router.add_post("/api/upload", upload_attachment)
+    app.router.add_static("/uploads", str(Path(__file__).parent.parent / "data" / "uploads"), show_index=False)
 
     # Auth API
     app.router.add_get("/api/auth/setup-status", auth_setup_status)
@@ -1622,6 +1720,42 @@ async def run_async(web_only: bool = False):
         file_watcher.start()
     except Exception as e:
         logger.warning(f"File watcher failed to start: {e}")
+
+    # Start workspace persona hot-reload (watches app/workspace/ for .md edits)
+    try:
+        from app.agent.persona import get_persona_loader
+        get_persona_loader().start_watcher()
+    except Exception as e:
+        logger.warning(f"Persona watcher failed to start: {e}")
+
+    # Start policy hot-reload (config/policy.yaml)
+    try:
+        from app.services.policy import get_policy
+        get_policy().start_watcher()
+    except Exception as e:
+        logger.warning(f"Policy watcher failed to start: {e}")
+
+    # Channel gateway: register adapters + start Telegram polling +
+    # install the approval-queue → broadcast notifier
+    try:
+        from app.services.channels import get_channel_gateway, install_approval_notifier
+        gateway = get_channel_gateway()
+        await gateway.start_all()
+        install_approval_notifier(user_id="user")
+    except Exception as e:
+        logger.warning(f"Channel gateway init failed: {e}")
+
+    # Heartbeat loop (off unless MYAI_HEARTBEAT=on, since it consumes tokens)
+    try:
+        import os as _os
+        if _os.getenv("MYAI_HEARTBEAT", "").lower() in ("on", "1", "true", "yes"):
+            from app.services.heartbeat import HeartbeatService
+            interval = int(_os.getenv("MYAI_HEARTBEAT_INTERVAL", "1800"))
+            hb = HeartbeatService(agent)
+            await hb.start_all(interval_seconds=interval, first_tick_delay=30)
+            logger.info(f"Heartbeat enabled, interval={interval}s")
+    except Exception as e:
+        logger.warning(f"Heartbeat start failed: {e}")
 
     # Start HTTP server (Web UI + debug + WebSocket)
     debug_app = create_debug_app()

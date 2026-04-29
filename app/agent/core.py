@@ -3,12 +3,25 @@ from __future__ import annotations
 import logging
 import re
 import time
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, AsyncIterator
 
+from app.agent.intercepts import try_intercept
+from app.agent.persona import DEFAULT_PERSONA, get_persona_loader
 from app.agent.prompts import SYSTEM_PROMPT, build_tool_prompt, TOOL_DEFINITIONS, TOOL_RESULT_TEMPLATE
+from app.services.journal import get_journal
 from app.services.ollama import OllamaClient
 from app.storage.database import Database
 from app.storage.models import Message, Role
+
+# Per-turn tool call collector. _chat() appends to this list while running so
+# the surrounding process_message can journal everything that happened.
+_tool_log_ctx: ContextVar[list[dict] | None] = ContextVar("_myai_tool_log", default=None)
+
+# Matches a leading @persona mention (e.g. "@sam find leads") and captures
+# the persona name + the rest of the message. Persona names are lowercase
+# alphanumeric + underscore.
+_PERSONA_MENTION_RE = re.compile(r"^\s*@([a-z][a-z0-9_]*)\b\s*(.*)$", re.IGNORECASE)
 
 if TYPE_CHECKING:
     from app.agent.tools import ToolRegistry
@@ -40,12 +53,39 @@ class AgentCore:
         self.agenthub_router: AgentHubRouter | None = agenthub_router
         self.rbac_service: RBACService | None = None
         self._prompt_override: str | None = None  # Set by learning loop when admin approves a refinement
+        self._persona_loader = get_persona_loader()
 
-    def _build_system_prompt(self) -> str:
-        base = self._prompt_override if self._prompt_override else SYSTEM_PROMPT
+    def _build_system_prompt(self, persona: str = DEFAULT_PERSONA) -> str:
+        # Learning-loop override always wins (admin-approved system prompt).
+        if self._prompt_override:
+            base = self._prompt_override
+        else:
+            # Try the persona workspace; fall back to the legacy SYSTEM_PROMPT
+            # if the workspace files are missing or empty (defensive — should
+            # not happen in normal operation).
+            composed = self._persona_loader.compose(persona)
+            base = composed if composed.strip() else SYSTEM_PROMPT
         if self.tools:
             base += "\n" + build_tool_prompt()
         return base
+
+    def _detect_persona(self, user_text: str) -> tuple[str, str]:
+        """Parse a leading @persona mention. Returns (persona, stripped_text).
+
+        If no mention or the mentioned persona doesn't exist, returns
+        (DEFAULT_PERSONA, user_text) unchanged.
+        """
+        m = _PERSONA_MENTION_RE.match(user_text)
+        if not m:
+            return DEFAULT_PERSONA, user_text
+        candidate = m.group(1).lower()
+        rest = m.group(2).strip()
+        available = {p.lower() for p in self._persona_loader.list_personas()}
+        if candidate in available and candidate != DEFAULT_PERSONA:
+            # Strip the mention from the message — the model gets persona via
+            # the system prompt, not via the user message.
+            return candidate, rest if rest else user_text
+        return DEFAULT_PERSONA, user_text
 
     async def process_message(
         self,
@@ -60,6 +100,11 @@ class AgentCore:
         if self.tools:
             self.tools._reminder_user_id = user_id
         t0 = time.monotonic()
+
+        # Detect @persona mention and strip it from the message we route on
+        persona, user_text = self._detect_persona(user_text)
+        if persona != DEFAULT_PERSONA:
+            logger.info("Persona switch: routing this turn to '%s'", persona)
         if conversation_id:
             conv = await self.db.get_conversation_by_id(conversation_id)
             if not conv:
@@ -77,10 +122,30 @@ class AgentCore:
         success = True
         error_message = None
 
+        # Set up the per-turn tool-call collector for the journaling step.
+        tool_log: list[dict] = []
+        _ctx_token = _tool_log_ctx.set(tool_log)
+
         try:
-            # 0. Try AgentHub first (if enabled) — the newer, governed gateway
-            ah_handled = False
-            if self.agenthub_router:
+            # 0a. Pre-intercept regex shortcuts — deterministic handling for
+            # high-value intents the LLM tends to miss (destructive blocker,
+            # reminder, email, app launch, URL open, etc.).  Only the default
+            # persona uses these — @sam / @polly turns go straight to the LLM
+            # so the persona prompt actually shapes the response.
+            if persona == DEFAULT_PERSONA:
+                intercept_result = await try_intercept(user_text, self, user_id)
+                if intercept_result is not None:
+                    response = intercept_result
+                    source = "intercept"
+                    event_type = "intercept"
+                    ah_handled = True  # short-circuit the rest of the pipeline
+                else:
+                    ah_handled = False
+            else:
+                ah_handled = False
+
+            # 0b. Try AgentHub (if enabled) — the newer, governed gateway
+            if not ah_handled and self.agenthub_router:
                 try:
                     ah_result = await self.agenthub_router.route(
                         message=user_text,
@@ -111,17 +176,32 @@ class AgentCore:
                 else:
                     # 2. Fall back to Ollama LLM with tool-calling
                     event_type = "llm_conversation"
-                    response = await self._chat(conv)
+                    response = await self._chat(conv, persona=persona)
         except Exception as e:
             success = False
             error_message = str(e)[:500]
             response = f"Error processing your request: {str(e)[:300]}"
             logger.error(f"process_message error: {e}", exc_info=True)
+        finally:
+            _tool_log_ctx.reset(_ctx_token)
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
         assistant_msg = Message(role=Role.ASSISTANT, content=response)
         msg_id = await self.db.add_message(conv.id, assistant_msg)
+
+        # Append to the persona's episodic journal (best-effort, never raises)
+        try:
+            get_journal().append(
+                persona=persona,
+                user_msg=user_text,
+                response=response,
+                tool_calls=tool_log,
+                source=source,
+                elapsed_ms=elapsed_ms,
+            )
+        except Exception as je:
+            logger.warning(f"Journal append failed: {je}")
 
         # Log usage event for analytics
         try:
@@ -222,6 +302,12 @@ class AgentCore:
             yield {"type": "response", **result}
             return
 
+        # Detect @persona mention so the local fallback branches honour it.
+        # NexgAI streaming itself doesn't use personas — it's an external service.
+        persona, user_text = self._detect_persona(user_text)
+        if persona != DEFAULT_PERSONA:
+            logger.info("Persona switch (streaming): '%s'", persona)
+
         # Stream through NexgAI
         t0 = time.monotonic()
         if conversation_id:
@@ -239,7 +325,7 @@ class AgentCore:
                 session_id = await self.nexgai.create_session()
                 if not session_id:
                     # Fall back to Ollama LLM
-                    response = await self._chat(conv)
+                    response = await self._chat(conv, persona=persona)
                     msg_id = await self.db.add_message(conv.id, Message(role=Role.ASSISTANT, content=response))
                     yield {"type": "response", "text": response, "message_id": msg_id,
                            "conversation_id": conv.id, "source": "local", "agent_name": None}
@@ -259,7 +345,7 @@ class AgentCore:
 
                 if event_type == "error":
                     # Stream failed — fall back to Ollama LLM
-                    response = await self._chat(conv)
+                    response = await self._chat(conv, persona=persona)
                     msg_id = await self.db.add_message(conv.id, Message(role=Role.ASSISTANT, content=response))
                     yield {"type": "response", "text": response, "message_id": msg_id,
                            "conversation_id": conv.id, "source": "local", "agent_name": None}
@@ -310,14 +396,14 @@ class AgentCore:
         except Exception as exc:
             logger.error("Streaming NexgAI failed: %s", exc, exc_info=True)
             # Fall back to Ollama LLM
-            response = await self._chat(conv)
+            response = await self._chat(conv, persona=persona)
             msg_id = await self.db.add_message(conv.id, Message(role=Role.ASSISTANT, content=response))
             yield {"type": "response", "text": response, "message_id": msg_id,
                    "conversation_id": conv.id, "source": "local", "agent_name": None}
 
-    async def _chat(self, conv) -> str:
+    async def _chat(self, conv, persona: str = DEFAULT_PERSONA) -> str:
         """Hybrid agent: LLM classifies intent → code executes tools → LLM synthesizes response."""
-        system = self._build_system_prompt()
+        system = self._build_system_prompt(persona=persona)
 
         msgs = [{"role": "system", "content": system}]
         for msg in conv.messages[-20:]:
@@ -367,7 +453,20 @@ class AgentCore:
             tool_name = parsed.get("name", "")
             arguments = parsed.get("arguments", {})
             logger.info(f"Tool call: {tool_name}({arguments})")
-            tool_result = await self.tools.execute(tool_name, arguments)
+            tool_result = await self.tools.execute(
+                tool_name, arguments,
+                persona=persona, actor="agent",
+            )
+
+            # Record into the journaling context (no-op if process_message
+            # didn't set one — e.g. a future caller invokes _chat directly).
+            tool_log = _tool_log_ctx.get()
+            if tool_log is not None:
+                tool_log.append({
+                    "name": tool_name,
+                    "args": arguments,
+                    "result": tool_result if isinstance(tool_result, str) else str(tool_result),
+                })
 
             # Step 2: Send tool result back to LLM for natural response
             msgs.append({"role": "assistant", "content": content})

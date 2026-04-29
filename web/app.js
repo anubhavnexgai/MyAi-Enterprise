@@ -585,29 +585,220 @@
         }
     }
 
+    // ----- Attachment state -------------------------------------------------
+    // Files the user has picked / dragged but not yet sent. Each entry:
+    //   {file: File, status: "pending"|"uploading"|"uploaded"|"error",
+    //    path?, name, kind?, size, error?}
+    var pendingAttachments = [];
+
+    function attachmentKindOf(file) {
+        var t = (file.type || "").toLowerCase();
+        if (t.indexOf("image/") === 0) return "image";
+        if (t === "application/pdf") return "pdf";
+        if (t.indexOf("text/") === 0 || t === "application/json") return "text";
+        if (t === "text/csv" || (file.name || "").toLowerCase().endsWith(".csv")) return "csv";
+        return "binary";
+    }
+
+    function renderAttachmentChips() {
+        var $area = document.getElementById("attachment-chips");
+        if (!$area) return;
+        if (pendingAttachments.length === 0) {
+            $area.classList.add("hidden");
+            $area.innerHTML = "";
+            return;
+        }
+        $area.classList.remove("hidden");
+        $area.innerHTML = "";
+        pendingAttachments.forEach(function (att, idx) {
+            var $chip = document.createElement("div");
+            $chip.className = "attachment-chip status-" + att.status;
+            var icon = "description";
+            if (att.kind === "image") icon = "image";
+            else if (att.kind === "pdf") icon = "picture_as_pdf";
+            else if (att.kind === "csv") icon = "table_chart";
+            var sizeKb = Math.max(1, Math.round((att.size || 0) / 1024));
+            $chip.innerHTML =
+                '<span class="material-symbols-outlined chip-icon">' + icon + '</span>' +
+                '<span class="chip-name" title="' + (att.name || "") + '">' +
+                    (att.name || "file") + '</span>' +
+                '<span class="chip-meta">' + sizeKb + ' KB</span>' +
+                '<button type="button" class="chip-remove" title="Remove" data-idx="' + idx + '">' +
+                    '<span class="material-symbols-outlined">close</span></button>';
+            $chip.querySelector(".chip-remove").onclick = function (e) {
+                e.preventDefault();
+                pendingAttachments.splice(idx, 1);
+                renderAttachmentChips();
+                updateSendDisabled();
+            };
+            $area.appendChild($chip);
+        });
+    }
+
+    function updateSendDisabled() {
+        var $send = document.getElementById("btn-send");
+        if (!$send) return;
+        var hasText = $input.value.trim().length > 0;
+        var hasAtt = pendingAttachments.some(function (a) {
+            return a.status === "uploaded" || a.status === "pending" || a.status === "uploading";
+        });
+        $send.disabled = !(hasText || hasAtt);
+    }
+
+    function addLocalAttachments(fileList) {
+        var files = Array.from(fileList || []);
+        files.forEach(function (file) {
+            // Reject anything > 25 MB before even uploading
+            if (file.size > 25 * 1024 * 1024) {
+                pendingAttachments.push({
+                    file: file, name: file.name, size: file.size,
+                    kind: attachmentKindOf(file),
+                    status: "error", error: "exceeds 25 MB",
+                });
+                return;
+            }
+            pendingAttachments.push({
+                file: file, name: file.name, size: file.size,
+                kind: attachmentKindOf(file),
+                status: "pending",
+            });
+        });
+        renderAttachmentChips();
+        updateSendDisabled();
+        // Begin uploads immediately
+        uploadPendingAttachments();
+    }
+
+    function uploadPendingAttachments() {
+        pendingAttachments.forEach(function (att) {
+            if (att.status !== "pending") return;
+            att.status = "uploading";
+            renderAttachmentChips();
+            var fd = new FormData();
+            fd.append("file", att.file, att.name);
+            fetch("/api/upload", { method: "POST", body: fd })
+                .then(function (r) { return r.json(); })
+                .then(function (json) {
+                    if (json.attachments && json.attachments.length) {
+                        var rec = json.attachments[0];
+                        att.status = "uploaded";
+                        att.path = rec.path;
+                        att.kind = rec.kind || att.kind;
+                    } else {
+                        att.status = "error";
+                        att.error = (json && json.error) || "upload failed";
+                    }
+                    renderAttachmentChips();
+                    updateSendDisabled();
+                })
+                .catch(function (err) {
+                    att.status = "error";
+                    att.error = String(err);
+                    renderAttachmentChips();
+                    updateSendDisabled();
+                });
+        });
+    }
+
+    // ----- Send (with attachments) ------------------------------------------
     function sendMessage(text) {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        if (!text.trim()) return;
+        // Allow sending with empty text if at least one uploaded attachment exists
+        var ready = pendingAttachments.filter(function (a) { return a.status === "uploaded"; });
+        if (!text.trim() && ready.length === 0) return;
 
-        addMessage("user", text);
+        var displayText = text || "(no message)";
+        if (ready.length > 0) {
+            var names = ready.map(function (a) { return a.name; }).join(", ");
+            displayText = (text ? text + "\n\n" : "") + "📎 " + names;
+        }
+        addMessage("user", displayText);
         showTyping();
+
+        var attachmentsForServer = ready.map(function (a) {
+            return { path: a.path, name: a.name, kind: a.kind };
+        });
 
         ws.send(JSON.stringify({
             type: "message",
             text: text,
+            attachments: attachmentsForServer,
             user_id: settings.userId,
             user_name: settings.userName,
         }));
+
+        // Clear attachments after send
+        pendingAttachments = [];
+        renderAttachmentChips();
+        updateSendDisabled();
     }
 
     function doSend() {
         var text = $input.value.trim();
-        if (!text) return;
+        var hasAtt = pendingAttachments.some(function (a) { return a.status === "uploaded"; });
+        if (!text && !hasAtt) return;
         removeWelcome();
         sendMessage(text);
         $input.value = "";
         autoResize();
     }
+
+    // ----- Wire up paperclip + drag/drop after DOM is ready ----------------
+    (function setupAttachUI() {
+        var $btn = document.getElementById("btn-attach");
+        var $fileInput = document.getElementById("file-input");
+        if ($btn && $fileInput) {
+            $btn.addEventListener("click", function () { $fileInput.click(); });
+            $fileInput.addEventListener("change", function () {
+                if ($fileInput.files && $fileInput.files.length) {
+                    addLocalAttachments($fileInput.files);
+                    $fileInput.value = "";  // allow re-pick same file
+                }
+            });
+        }
+
+        // Drag-and-drop on the whole document
+        var $overlay = document.getElementById("drop-overlay");
+        var dragDepth = 0;
+
+        function isFileDrag(e) {
+            if (!e.dataTransfer) return false;
+            var t = e.dataTransfer.types;
+            if (!t) return false;
+            for (var i = 0; i < t.length; i++) {
+                if (t[i] === "Files" || t[i] === "application/x-moz-file") return true;
+            }
+            return false;
+        }
+
+        document.addEventListener("dragenter", function (e) {
+            if (!isFileDrag(e)) return;
+            e.preventDefault();
+            dragDepth++;
+            if ($overlay) $overlay.classList.remove("hidden");
+        });
+        document.addEventListener("dragover", function (e) {
+            if (!isFileDrag(e)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+        });
+        document.addEventListener("dragleave", function (e) {
+            if (!isFileDrag(e)) return;
+            dragDepth = Math.max(0, dragDepth - 1);
+            if (dragDepth === 0 && $overlay) $overlay.classList.add("hidden");
+        });
+        document.addEventListener("drop", function (e) {
+            if (!isFileDrag(e)) return;
+            e.preventDefault();
+            dragDepth = 0;
+            if ($overlay) $overlay.classList.add("hidden");
+            var files = (e.dataTransfer && e.dataTransfer.files) || [];
+            if (files.length) addLocalAttachments(files);
+        });
+
+        // Re-enable Send when text changes (with attachments present)
+        if ($input) $input.addEventListener("input", updateSendDisabled);
+    })();
 
     // -- UI rendering --
     function addMessage(role, text, agent, messageId, conversationId, source) {

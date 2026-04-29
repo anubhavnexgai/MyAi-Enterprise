@@ -50,28 +50,155 @@ class ToolRegistry:
             "browse_web": self._browse_web,
             "mcp_call": self._mcp_call,
             "orchestrate": self._orchestrate,
+            "consolidate_memory": self._consolidate_memory,
+            "start_goal": self._start_goal,
+            "goal_status": self._goal_status,
+            "cancel_goal": self._cancel_goal,
+            "describe_image": self._describe_image,
+            "describe_screen": self._describe_screen,
+            "skill_factory_create": self._skill_factory_create,
+            "skill_factory_install": self._skill_factory_install,
         }
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        """Execute a tool by name with given arguments."""
-        # Guardrails check — runs BEFORE any tool execution
+        # Auto-load any previously-installed user skills.
+        try:
+            from app.services.skill_factory import get_skill_factory
+            n = get_skill_factory().load_into(self)
+            if n:
+                logger.info("Loaded %d installed user skill(s)", n)
+        except Exception as exc:
+            logger.warning("Skill auto-load failed: %s", exc)
+
+    async def execute(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        persona: str | None = None,
+        actor: str = "agent",
+        wait_for_approval: bool = False,
+        approval_timeout: float = 600.0,
+    ) -> str:
+        """Execute a tool by name with given arguments.
+
+        Decision pipeline:
+            1. Hard-coded guardrails (existing destructive-block patterns)
+            2. Policy.is_blocked            -> refuse
+            3. Policy.is_approval_required  -> queue (and optionally await)
+            4. Tool exists?                 -> run
+            5. Audit the outcome
+        """
+        # Lazy imports to avoid module-load cycles and to let tests substitute singletons.
+        from app.services.policy import get_policy
+        from app.services.audit import get_audit
+        from app.services.approval import get_approval
+        policy = get_policy()
+        audit = get_audit()
+
+        # 1. Hard-coded guardrails (the existing layer — destructive-keyword blocker etc.)
         if self._guardrails:
             allowed, reason = self._guardrails.check(tool_name, arguments)
             if not allowed:
+                audit.record(actor=actor, persona=persona, action=tool_name,
+                             decision="blocked", inputs=arguments,
+                             reason=f"guardrails: {reason}")
                 return f"Action blocked: {reason}"
 
-        if tool_name not in self._tools:
-            return f"Unknown tool: {tool_name}. Available: {', '.join(self._tools.keys())}"
+        # 2. Policy: hard-blocked tool
+        if policy.is_blocked(tool_name):
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="blocked", inputs=arguments, reason="policy.blocked")
+            return f"⛔ Tool '{tool_name}' is blocked by policy."
 
+        # 2b. Critic review (if policy lists this tool). If critic objects,
+        # we promote the action into the approval queue path below.
+        critic_objection: str | None = None
+        if policy.needs_critic(tool_name):
+            from app.services.critic import get_critic
+            review = await get_critic().review(tool_name, arguments, persona=persona or "default")
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="critic_" + ("approve" if review["approve"] else "object"),
+                         inputs=arguments, reason=review.get("reasoning", ""))
+            if not review["approve"]:
+                critic_objection = (
+                    f"Critic flagged ({review.get('concern_level', '?')}): "
+                    f"{review.get('reasoning', 'no reason given')}"
+                )
+
+        # 3. Policy: approval required (or critic forced it)
+        if policy.is_approval_required(tool_name) or critic_objection is not None:
+            approval = get_approval()
+            action_id = approval.queue(
+                tool=tool_name,
+                args=arguments,
+                requested_by=actor,
+                persona=persona,
+                reason=critic_objection or "policy.approval_required",
+            )
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="queued", inputs=arguments,
+                         reason=f"approval-required (id={action_id})")
+            if not wait_for_approval:
+                return (
+                    f"🔒 `{tool_name}` requires approval. Queued as #{action_id}.\n"
+                    "Approve via the web admin UI, a WhatsApp/Telegram ✅ reply, or "
+                    f"`python -m app.scripts.approve {action_id}`."
+                )
+            # Blocking caller (e.g. autonomy loop): wait for decision.
+            try:
+                decision = await approval.wait_for(action_id, timeout=approval_timeout)
+            except Exception as e:
+                audit.record(actor=actor, persona=persona, action=tool_name,
+                             decision="error", inputs=arguments, reason=f"wait_failed: {e}")
+                return f"⏰ Approval wait failed for {tool_name} (id={action_id}): {e}"
+            status = decision.get("status", "unknown")
+            if status != "approved":
+                audit.record(actor=actor, persona=persona, action=tool_name,
+                             decision=status, inputs=arguments,
+                             reason=decision.get("decision_note", ""))
+                return (f"❌ `{tool_name}` was {status} by "
+                        f"{decision.get('decided_by', '?')}"
+                        + (f": {decision['decision_note']}" if decision.get("decision_note") else ""))
+            # Fall through to execute below.
+
+        # 4. Tool exists?
+        if tool_name not in self._tools:
+            msg = f"Unknown tool: {tool_name}. Available: {', '.join(self._tools.keys())}"
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="blocked", inputs=arguments, reason="unknown_tool")
+            return msg
+
+        # 5. Execute + audit
         try:
             result = await self._tools[tool_name](**arguments)
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="allowed", inputs=arguments, outputs=result)
             return result
         except PermissionDeniedError as e:
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="blocked", inputs=arguments, reason=f"perm_denied: {e}")
             return f"⛔ Permission denied: {e}"
         except FileAccessError as e:
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="error", inputs=arguments, reason=str(e))
             return f"❌ File error: {e}"
+        except TypeError as e:
+            # Most common cause: LLM invented a kwarg name (e.g. 'directory_path'
+            # instead of 'path'). Tell it the real signature so it can retry.
+            try:
+                import inspect
+                sig = str(inspect.signature(self._tools[tool_name]))
+            except Exception:
+                sig = "(unknown signature)"
+            hint = f"Wrong arguments. Correct signature: {tool_name}{sig}. You sent: {list(arguments.keys())}"
+            logger.warning("Tool %s called with bad args (%s): %s", tool_name, e, list(arguments.keys()))
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="error", inputs=arguments, reason=f"bad_args: {e}")
+            return f"❌ {hint}"
         except Exception as e:
             logger.error(f"Tool {tool_name} failed: {e}", exc_info=True)
+            audit.record(actor=actor, persona=persona, action=tool_name,
+                         decision="error", inputs=arguments, reason=str(e)[:200])
             return f"❌ Tool error: {e}"
 
     # ── Tool implementations ──
@@ -699,6 +826,93 @@ $bitmap.Dispose()
         from app.services.ollama import OllamaClient
         orchestrator = CrewOrchestrator(self, OllamaClient())
         return await orchestrator.orchestrate(task)
+
+    async def _start_goal(self, description: str, persona: str = "default") -> str:
+        """Plan and start an autonomous goal in the background."""
+        from app.services.autonomy import get_autonomy
+        autonomy = get_autonomy(tools=self)
+        goal_id = await autonomy.start(description, persona=persona, requested_by="user")
+        st = autonomy.status(goal_id)
+        steps = st.get("steps", [])
+        plan_preview = "\n".join(f"  {i+1}. {s['description']}" for i, s in enumerate(steps[:6]))
+        if len(steps) > 6:
+            plan_preview += f"\n  ... ({len(steps) - 6} more)"
+        return (
+            f"🤖 Goal #{goal_id} started ({len(steps)} steps).\n"
+            f"{plan_preview}\n\n"
+            f"Use goal_status({goal_id}) to check progress."
+        )
+
+    async def _goal_status(self, goal_id: int) -> str:
+        from app.services.autonomy import get_autonomy
+        st = get_autonomy(tools=self).status(int(goal_id))
+        if "error" in st:
+            return st["error"]
+        g = st["goal"]
+        steps = st["steps"]
+        lines = [f"Goal #{g['id']} [{g['status']}]: {g['goal']}"]
+        if g.get("summary"):
+            lines.append(f"Summary: {g['summary']}")
+        for s in steps:
+            mark = {"done": "✓", "failed": "✗", "running": "▶", "pending": "·",
+                    "skipped": "~"}.get(s["status"], "?")
+            lines.append(f"  {mark} [{s['status']}] {s['description']}")
+            if s.get("result"):
+                lines.append(f"      → {s['result'][:120]}")
+        return "\n".join(lines)
+
+    async def _cancel_goal(self, goal_id: int) -> str:
+        from app.services.autonomy import get_autonomy
+        get_autonomy(tools=self).cancel(int(goal_id))
+        return f"Goal #{goal_id} cancelled."
+
+    async def _skill_factory_create(self, description: str, name: str) -> str:
+        """Generate a new tool (staged, not yet active)."""
+        from app.services.skill_factory import get_skill_factory
+        result = await get_skill_factory().create(description, name)
+        if result["status"] == "staged":
+            return (
+                f"📦 Staged skill `{result['name']}` at {result['staged_path']}.\n\n"
+                f"```python\n{result['code']}\n```\n\n"
+                f"{result['next_step']}"
+            )
+        return f"Skill creation rejected: {result['reason']}"
+
+    async def _skill_factory_install(self, name: str) -> str:
+        """Install a previously-staged skill into the live registry."""
+        from app.services.skill_factory import get_skill_factory
+        result = get_skill_factory().install(name, self)
+        if result["status"] == "installed":
+            return f"✅ Skill `{name}` installed at {result['path']} and live."
+        return f"Install failed: {result['reason']}"
+
+    async def _describe_image(self, path: str, question: str = "") -> str:
+        """Describe an image file using the local vision model (LLaVA via Ollama)."""
+        from app.services.vision import get_vision
+        return await get_vision().describe(path, prompt=question)
+
+    async def _describe_screen(self, question: str = "") -> str:
+        """Take a screenshot and describe what's on the screen."""
+        from app.services.vision import get_vision
+        return await get_vision().describe_screen(prompt=question)
+
+    async def _consolidate_memory(self, persona: str = "default", date: str = "") -> str:
+        """Run the dreaming/consolidation job for a persona-day."""
+        from datetime import date as date_cls
+        from app.services.diary import get_diary_service
+        on = None
+        if date:
+            try:
+                on = date_cls.fromisoformat(date)
+            except ValueError:
+                return f"Invalid date '{date}'. Use YYYY-MM-DD."
+        result = await get_diary_service().consolidate(persona=persona, on=on)
+        if result["status"] == "no_journal":
+            return f"No journal entries for persona '{persona}' on {date or 'today'}."
+        return (
+            f"Consolidated {result['entries_processed']} entries → {result['diary_path']}. "
+            f"Added {result['facts_added']} new fact(s) to user.md."
+        )
 
     @staticmethod
     def parse_tool_call(text: str) -> dict | None:

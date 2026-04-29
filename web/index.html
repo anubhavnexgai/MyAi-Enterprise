@@ -6,7 +6,7 @@
     <title>MyAi</title>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v=attach-2026-04-28">
 </head>
 <body>
     <div id="app">
@@ -197,9 +197,16 @@
             <!-- Input Bar -->
             <div class="input-area">
                 <form id="chat-form">
+                    <!-- Attachment chips (populated when user picks/drops files) -->
+                    <div id="attachment-chips" class="attachment-chips hidden"></div>
+
                     <div class="input-bar-wrapper">
                         <div class="input-glow"></div>
                         <div class="input-bar">
+                            <button type="button" id="btn-attach" class="attach-btn" title="Attach file or image">
+                                <span class="material-symbols-outlined">attach_file</span>
+                            </button>
+                            <input type="file" id="file-input" multiple accept="image/*,.pdf,.txt,.md,.csv,.json,.log" hidden>
                             <textarea id="chat-input" placeholder="Ask MyAi anything..." rows="1" autofocus></textarea>
                             <div class="input-actions">
                                 <button type="button" id="btn-send" disabled title="Send message">
@@ -209,9 +216,18 @@
                         </div>
                     </div>
                     <div class="input-hints">
-                        <span>Try: <code>/help</code> <code>/status</code> <code>/skills</code> <code>/admin</code> <code>/remind</code></span>
+                        <span>Try: <code>/help</code> <code>/status</code> <code>/skills</code> <code>/admin</code> <code>/remind</code> · drag &amp; drop files anywhere</span>
                     </div>
                 </form>
+            </div>
+
+            <!-- Drag-drop overlay (shown only while dragging) -->
+            <div id="drop-overlay" class="drop-overlay hidden">
+                <div class="drop-overlay-card">
+                    <span class="material-symbols-outlined drop-icon">cloud_upload</span>
+                    <p class="drop-title">Drop to attach</p>
+                    <p class="drop-subtitle">Images, PDFs, text, CSV — up to 25 MB each</p>
+                </div>
             </div>
         </main>
 
@@ -243,6 +259,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=attach-2026-04-28"></script>
 </body>
 </html>

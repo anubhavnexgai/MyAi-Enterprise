@@ -22,3 +22,19 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+
+# Runtime logs and test outputs
+server.log
+*.log.jsonl
+_continuous_test.console.log
+_continuous_test.summary.md
+_validation.log
+system_info_summary.txt
+
+# Workspace runtime state (journals, diaries, staged skills are local-only)
+app/workspace/journal/
+app/workspace/agents/*/journal/
+app/workspace/diary/
+app/workspace/agents/*/diary/
+app/workspace/skills/_staging/
+app/workspace/skills/*.py

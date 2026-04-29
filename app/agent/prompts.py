@@ -82,6 +82,26 @@ def build_tool_prompt() -> str:
         "```tool\n"
         '{"name": "send_email", "arguments": {"to": "john@test.com", "subject": "Hello", "body": "Hello"}}\n'
         "```\n\n"
+        'User: "what\'s on my screen right now" / "describe my screen"\n'
+        "```tool\n"
+        '{"name": "describe_screen", "arguments": {}}\n'
+        "```\n\n"
+        'User: "describe this image at C:\\\\Users\\\\me\\\\photo.png"\n'
+        "```tool\n"
+        '{"name": "describe_image", "arguments": {"path": "C:\\\\Users\\\\me\\\\photo.png"}}\n'
+        "```\n\n"
+        'User: "start a goal to count python files in my project"\n'
+        "```tool\n"
+        '{"name": "start_goal", "arguments": {"description": "count python files in my project"}}\n'
+        "```\n\n"
+        'User: "create a tool that converts celsius to fahrenheit, name it celsius_to_f"\n'
+        "```tool\n"
+        '{"name": "skill_factory_create", "arguments": {"description": "convert celsius to fahrenheit", "name": "celsius_to_f"}}\n'
+        "```\n\n"
+        'User: "list files in my downloads folder"\n'
+        "```tool\n"
+        '{"name": "list_directory", "arguments": {"path": "C:\\\\Users\\\\anubh\\\\Downloads"}}\n'
+        "```\n\n"
         "Available tools:\n"
         "- read_file: Read a file. Args: {\"path\": \"...\"}\n"
         "- list_directory: List contents of a directory. Args: {\"path\": \"...\"}\n"
@@ -106,7 +126,15 @@ def build_tool_prompt() -> str:
         "- open_file: Open a file by name or path. Searches Desktop, Downloads, Documents automatically. Args: {\"path\": \"PRD\" or \"demo script\" or \"C:\\\\Users\\\\...\"}\n"
         "- browse_web: Control a browser to navigate websites, search Google, fill forms. Args: {\"task\": \"go to google.com and search for AI news\"}\n"
         "- mcp_call: Call a tool on an MCP server. Args: {\"server\": \"server_name\", \"tool\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}\n"
-        "- orchestrate: Break a complex task into subtasks and execute them in parallel. Args: {\"task\": \"research AI news and summarize my project status\"}\n\n"
+        "- orchestrate: Break a complex task into subtasks and execute them in parallel. Args: {\"task\": \"research AI news and summarize my project status\"}\n"
+        "- consolidate_memory: Run the dreaming/diary job — summarize a persona's journal for a day, extract durable user facts into user.md. Args: {\"persona\": \"default\", \"date\": \"\"} (date blank = today)\n"
+        "- start_goal: Kick off an autonomous goal — planner decomposes it, executor runs steps in the background. Args: {\"description\": \"draft a status report and email it to Priti\", \"persona\": \"default\"}\n"
+        "- goal_status: Check progress on a running goal. Args: {\"goal_id\": 1}\n"
+        "- cancel_goal: Cancel a running goal. Args: {\"goal_id\": 1}\n"
+        "- describe_image: Describe what's in an image file using the local vision model. Args: {\"path\": \"C:\\\\...\\\\photo.png\", \"question\": \"optional specific question\"}\n"
+        "- describe_screen: Take a screenshot and describe it. Args: {\"question\": \"optional specific question about the screen\"}\n"
+        "- skill_factory_create: Generate a new tool/skill from a natural-language description. Stages it for review. Args: {\"description\": \"a tool that hashes a string with sha256\", \"name\": \"sha256_hash\"}\n"
+        "- skill_factory_install: Install a previously-staged skill (approval-required). Args: {\"name\": \"sha256_hash\"}\n\n"
         "IMPORTANT CONTEXT:\n"
         f"- This is a Windows PC. The user's home directory is: {home}\n"
         f"- Always use Windows paths with backslashes.\n"
@@ -472,6 +500,118 @@ TOOL_DEFINITIONS = [
                     "task": {"type": "string", "description": "Complex task to decompose and execute in parallel"}
                 },
                 "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consolidate_memory",
+            "description": "Run the dreaming/diary loop for a persona-day. Reads the persona's journal, writes a diary entry, and appends durable user facts to user.md. Use when the user asks to 'consolidate', 'dream', 'reflect on the day', or 'update memory'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "persona": {"type": "string", "description": "Persona name. Default: 'default'."},
+                    "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Empty for today."}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_goal",
+            "description": "Kick off an autonomous goal. The planner decomposes it into steps, the autonomy executor runs them in the background, replanning once on failure. Use for multi-step tasks the user wants the agent to drive end-to-end.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Plain-language goal, e.g. 'draft a status report and email it to Priti'"},
+                    "persona": {"type": "string", "description": "Which persona drives the goal. Default: 'default'."}
+                },
+                "required": ["description"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "goal_status",
+            "description": "Show current state of a running or finished autonomous goal.",
+            "parameters": {
+                "type": "object",
+                "properties": {"goal_id": {"type": "integer", "description": "Goal id from start_goal"}},
+                "required": ["goal_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_goal",
+            "description": "Stop a running autonomous goal.",
+            "parameters": {
+                "type": "object",
+                "properties": {"goal_id": {"type": "integer", "description": "Goal id to cancel"}},
+                "required": ["goal_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_image",
+            "description": "Describe what's in an image file using the local LLaVA vision model. Use when the user shares a screenshot, photo, or asks 'what's in this image?'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the image file"},
+                    "question": {"type": "string", "description": "Optional specific question to ask about the image"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_screen",
+            "description": "Take a screenshot of the current screen and describe what's visible. Use when the user asks 'what am I looking at?', 'what's on my screen?', or wants help with something visible.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "Optional specific question about the screen contents"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_factory_create",
+            "description": "Generate a brand-new tool/skill on demand from a description. The generated Python is linted and staged for review. Use when the user asks for a capability that no existing tool covers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "What the new skill should do"},
+                    "name": {"type": "string", "description": "snake_case name to register the skill under"}
+                },
+                "required": ["description", "name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_factory_install",
+            "description": "Install a previously-staged skill into the live tool registry. APPROVAL REQUIRED.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name of the staged skill to install"}
+                },
+                "required": ["name"]
             }
         }
     },

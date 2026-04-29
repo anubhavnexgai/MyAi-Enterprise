@@ -1563,3 +1563,135 @@ html, body {
     from { opacity: 0; transform: translateY(-10px); }
     to { opacity: 1; transform: translateY(0); }
 }
+
+/* ============================================================
+   Attachments — paperclip, chips, drag-drop overlay
+   ============================================================ */
+.attach-btn {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.55);
+    cursor: pointer;
+    padding: 0 8px;
+    margin-right: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s ease, transform 0.15s ease;
+}
+.attach-btn:hover {
+    color: rgba(255, 255, 255, 0.95);
+    transform: scale(1.08);
+}
+.attach-btn .material-symbols-outlined {
+    font-size: 22px;
+}
+
+.attachment-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 4px 6px 4px;
+}
+.attachment-chips.hidden { display: none; }
+
+.attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 6px 6px 10px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 999px;
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.85);
+    max-width: 320px;
+}
+.attachment-chip.status-uploading {
+    border-color: rgba(118, 152, 255, 0.45);
+}
+.attachment-chip.status-uploaded {
+    border-color: rgba(95, 215, 140, 0.55);
+    background: rgba(95, 215, 140, 0.08);
+}
+.attachment-chip.status-error {
+    border-color: rgba(255, 110, 110, 0.55);
+    background: rgba(255, 110, 110, 0.08);
+}
+.attachment-chip .chip-icon {
+    font-size: 18px;
+    color: rgba(255, 255, 255, 0.7);
+}
+.attachment-chip .chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+.attachment-chip .chip-meta {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.45);
+    font-variant-numeric: tabular-nums;
+}
+.attachment-chip .chip-remove {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.55);
+    cursor: pointer;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    border-radius: 50%;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.attachment-chip .chip-remove:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: rgba(255, 255, 255, 1);
+}
+.attachment-chip .chip-remove .material-symbols-outlined {
+    font-size: 16px;
+}
+
+/* Drag-drop overlay */
+.drop-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(7, 11, 22, 0.78);
+    backdrop-filter: blur(6px);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    animation: dropFadeIn 0.12s ease;
+}
+.drop-overlay.hidden { display: none; }
+
+.drop-overlay-card {
+    border: 2px dashed rgba(118, 152, 255, 0.7);
+    border-radius: 24px;
+    padding: 40px 60px;
+    background: rgba(20, 25, 45, 0.85);
+    text-align: center;
+    box-shadow: 0 0 60px rgba(118, 152, 255, 0.25);
+}
+.drop-overlay-card .drop-icon {
+    font-size: 56px;
+    color: rgba(118, 152, 255, 0.95);
+    margin-bottom: 12px;
+}
+.drop-overlay-card .drop-title {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 6px 0 4px 0;
+    color: rgba(255, 255, 255, 0.96);
+}
+.drop-overlay-card .drop-subtitle {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.6);
+    margin: 0;
+}
+@keyframes dropFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
